@@ -1,0 +1,224 @@
+Below I’ll give a compact, practical set of **next steps + Terraform snippets + Spinnaker wiring** so your Spinnaker pipelines can safely deploy ECS services (red/black) and your tasks receive Dynatrace tokens securely from AWS Secrets Manager.
+
+I’ll cover:
+
+1. What Terraform must expose for Spinnaker to consume
+2. How to store Dynatrace tokens in Secrets Manager with Terraform
+3. How to inject those secrets into ECS task definitions (Fargate/EC2)
+4. Required IAM permissions for ECS tasks to read secrets
+5. How Spinnaker should be configured for Red/Black (Red/Black = Blue/Green) ECS deploys
+6. Small notes on rotation, KMS, and CI flow
+
+---
+
+# 1) Terraform — outputs Spinnaker needs
+
+Spinnaker needs the ALB, listener, target group names/ARNs and cluster/service names so it can attach a new task set to the ALB and do traffic shifting.
+
+Example `outputs.tf` (terraform infra repo):
+
+```hcl
+output "alb_arn" {
+  value = aws_lb.app_alb.arn
+}
+
+output "alb_listener_arn" {
+  value = aws_lb_listener.front_end.arn
+}
+
+output "tg_blue_arn" {
+  value = aws_lb_target_group.blue.arn
+}
+
+output "tg_green_arn" {
+  value = aws_lb_target_group.green.arn
+}
+
+output "ecs_cluster_name" {
+  value = aws_ecs_cluster.main.name
+}
+
+output "ecs_service_name" {
+  value = aws_ecs_service.app_service.name
+}
+```
+
+Expose these (and any ARNs) in a way Spinnaker can read them (S3 artifact, outputs file, or manually configured in the Spinnaker stage).
+
+---
+
+# 2) Create/store Dynatrace tokens in Secrets Manager (Terraform)
+
+**Store tokens as Secrets Manager secrets** (one secret per token or combined JSON object). Don’t keep tokens in tfvars.
+
+Example (single secret per token):
+
+```hcl
+resource "aws_secretsmanager_secret" "dynatrace_api" {
+  name = "dynatrace/api-token"
+  description = "Dynatrace API token for shared tenant"
+}
+
+resource "aws_secretsmanager_secret_version" "dynatrace_api_value" {
+  secret_id     = aws_secretsmanager_secret.dynatrace_api.id
+  secret_string = var.dynatrace_api_token_plaintext
+  # better: pass token via CI or parameter store, not in tfvars
+}
+```
+
+Better pattern: create the secret in Secrets Manager manually or via pipeline and **do not** put the actual token into Terraform state. You can create the secret resource but set the secret value from CI via AWS CLI or parameterized pipeline.
+
+If you want both tokens in one secret (JSON):
+
+```hcl
+resource "aws_secretsmanager_secret" "dynatrace_all" {
+  name = "dynatrace/tokens"
+}
+
+# set secret externally to avoid storing in state
+```
+
+---
+
+# 3) Inject secrets into ECS task definition (Fargate / EC2)
+
+Use the `secrets` field in the container definition so AWS injects the secret as an env var at runtime.
+
+Example Terraform `aws_ecs_task_definition` snippet:
+
+```hcl
+resource "aws_ecs_task_definition" "app" {
+  family                   = "orders-app"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name  = "app"
+      image = var.container_image
+      portMappings = [
+        { containerPort = 8080, protocol = "tcp" }
+      ]
+      environment = [
+        { name = "ENVIRONMENT", value = var.environment }
+      ]
+      secrets = [
+        {
+          name      = "DT_API_TOKEN"            # env var name inside container
+          valueFrom = aws_secretsmanager_secret.dynatrace_api.arn
+        },
+        {
+          name      = "DT_PAAS_TOKEN"
+          valueFrom = aws_secretsmanager_secret.dynatrace_paas.arn
+        }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = "/ecs/${var.environment}/orders"
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "orders"
+        }
+      }
+    }
+  ])
+}
+```
+
+Notes:
+
+* `valueFrom` can be the secret ARN or the specific secret ARN + JSON key path if you stored a JSON secret (e.g., `arn:aws:secretsmanager:...:secret:dynatrace/tokens:DT_API_TOKEN::`).
+* Execution role must have permission to `secretsmanager:GetSecretValue` (see next section).
+
+---
+
+# 4) IAM permissions — allow ECS task to read the secret
+
+Attach policy to the **task role** (or task execution role depending on how you fetch secrets). Example minimal policy:
+
+```hcl
+resource "aws_iam_role_policy" "ecs_task_secrets" {
+  name = "ecs-task-secrets-access"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "kms:Decrypt"
+        ]
+        Resource = [
+          aws_secretsmanager_secret.dynatrace_api.arn,
+          aws_secretsmanager_secret.dynatrace_paas.arn
+        ]
+      }
+    ]
+  })
+}
+```
+
+If Secrets Manager secret is KMS-encrypted with a CMK, include `kms:Decrypt` on that CMK.
+
+---
+
+# 5) Spinnaker configuration (Deploy (ECS) stage) — practical points
+
+Spinnaker UI / pipeline stage settings (Red/Black):
+
+* **Pipeline trigger:** Docker image push (artifact) or manual.
+* **Deploy (ECS)** stage:
+
+  * Account: aws-prod (Spinnaker AWS account)
+  * Cluster: use the same cluster name Terraform created
+  * Service name: `orders-service` (the one Terraform created or Spinnaker creates)
+  * Container artifact: bind to the ECR image artifact the CI produced
+  * **Strategy**: `Red/Black` (Spinnaker term for Blue/Green)
+  * Load balancers: choose the ALB & listener; configure target group pair if needed
+  * Check `Scale down old server group` (time window before disabling old)
+* **Health checks & verification:**
+
+  * Set health checks aligned with ALB target group (path/timeout)
+  * Optionally add a **Canary** stage (Spinnaker/Kayenta) with Dynatrace as the metric source
+* **Secrets & env overrides (if needed):**
+
+  * If Spinnaker is rendering the task definition, ensure it does not accidentally overwrite injected secrets.
+  * Better: let Terraform create task definition skeleton with the `secrets` block and let Spinnaker deploy new server group with updated image only.
+
+Important: If Spinnaker manages task definitions, it must preserve the `secrets` block — validate that the Spinnaker config for the container includes the secret env var definitions (or uses task definition artifact created by Terraform).
+
+---
+
+# 6) Rotation, KMS, auditing, and pipeline flow
+
+* **Rotation:** Rotate tokens in Secrets Manager periodically. When rotating, update secret value, ECS tasks will pick new secret next restart. For immediate effect, trigger a Spinnaker redeploy.
+* **KMS:** Use a customer-managed CMK for stronger control and audit. Add `kms:Decrypt` to task role.
+* **Audit:** Enable CloudTrail on Secrets Manager and use IAM conditions to limit access.
+* **CI flow:** Jules builds image → pushes to ECR → triggers Spinnaker pipeline → Spinnaker launches new server group (green) using the new image → health checks → traffic shift → old server group disabled.
+
+---
+
+# Quick checklist for you to validate
+
+* [ ] Terraform exposes ALB/Listener/TG/cluster/service outputs (or Spinnaker knows the names)
+* [ ] Dynatrace tokens are stored as Secrets Manager secrets (no plaintext in tfstate)
+* [ ] ECS task definition contains `secrets` references (valueFrom = secret ARN)
+* [ ] Task role (or execution role as appropriate) has `secretsmanager:GetSecretValue` + `kms:Decrypt` permissions for those secrets
+* [ ] Spinnaker Deploy (ECS) stage configured as Red/Black and points at the ALB/target groups
+* [ ] Health checks and canary integration (Dynatrace/Kayenta) configured for automated verification + rollback
+* [ ] CI (Jules) triggers Spinnaker on successful image push
+
+---
+
+If you want, I can next:
+
+* Generate a **complete Terraform module** that creates Secrets Manager secrets (but leaves secret values out of state), ECS task definition with `secrets` injection, and required IAM roles/policies; **or**
+* Draft a **Spinnaker Deploy (ECS) stage JSON** you can import with example settings for Red/Black and artifact binding.
+
+Which would be most useful right now?
