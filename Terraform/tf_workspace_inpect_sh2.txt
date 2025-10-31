@@ -1,0 +1,160 @@
+Good catch ✅ — the script I gave is a **Bash script**, so it runs natively on:
+
+* **macOS / Linux**
+* **Windows with WSL (Windows Subsystem for Linux)** or **Git Bash**
+
+If you’re on **Windows PowerShell or CMD**, a few adjustments are needed because:
+
+* `curl`, `jq`, and `column` behave differently
+* Output formatting (pipes and sorting) must use PowerShell syntax
+
+Let’s cover your options 👇
+
+---
+
+## 🧩 **Option 1 — Run it directly (Recommended via WSL or Git Bash)**
+
+### 🪟 Install WSL (Windows Subsystem for Linux)
+
+If not installed yet:
+
+```powershell
+wsl --install
+```
+
+Then open **Ubuntu** (or your distro) from Start Menu and run:
+
+```bash
+sudo apt update && sudo apt install -y jq curl
+```
+
+Copy the script (same as before), make it executable:
+
+```bash
+chmod +x tf_workspace_inspect.sh
+```
+
+Run it:
+
+```bash
+./tf_workspace_inspect.sh my-org my-workspace my-api-token
+```
+
+✅ Works perfectly — full JSON parsing and formatting.
+
+---
+
+## 🧩 **Option 2 — Run in PowerShell (converted version)**
+
+Here’s a **PowerShell equivalent script** (`tf_workspace_inspect.ps1`)
+that does the same: lists all resources and outputs from your Terraform Cloud workspace.
+
+---
+
+### ⚙️ **PowerShell Script:**
+
+```powershell
+param (
+    [string]$Org,
+    [string]$Workspace,
+    [string]$Token
+)
+
+if (-not $Org -or -not $Workspace -or -not $Token) {
+    Write-Host "Usage: .\tf_workspace_inspect.ps1 -Org <organization> -Workspace <workspace> -Token <tfc_api_token>"
+    exit 1
+}
+
+$api = "https://app.terraform.io/api/v2"
+
+Write-Host "🔍 Fetching workspace ID for '$Org/$Workspace'..."
+$workspaceData = curl -s -H "Authorization: Bearer $Token" "$api/organizations/$Org/workspaces/$Workspace" | ConvertFrom-Json
+$workspaceId = $workspaceData.data.id
+
+if (-not $workspaceId) {
+    Write-Host "❌ Failed to get workspace ID. Check org/workspace name or token."
+    exit 1
+}
+Write-Host "✅ Workspace ID: $workspaceId"
+
+Write-Host "📦 Fetching current state version URL..."
+$stateData = curl -s -H "Authorization: Bearer $Token" "$api/workspaces/$workspaceId/current-state-version" | ConvertFrom-Json
+$stateUrl = $stateData.data.attributes.'hosted-state-download-url'
+
+if (-not $stateUrl) {
+    Write-Host "❌ Failed to get state URL. Ensure workspace has a successful run."
+    exit 1
+}
+
+Write-Host "⬇️ Downloading state file..."
+curl -s -o state.json $stateUrl | Out-Null
+
+if (-not (Test-Path state.json)) {
+    Write-Host "❌ State file download failed."
+    exit 1
+}
+
+Write-Host "✅ State file downloaded."
+
+Write-Host ""
+Write-Host "🧱 Terraform Resources:"
+Write-Host "-----------------------"
+$state = Get-Content state.json | ConvertFrom-Json
+$state.resources | ForEach-Object { "$($_.type)`t$($_.name)" } | Sort-Object | Format-Table -AutoSize
+
+Write-Host ""
+Write-Host "📤 Terraform Outputs:"
+Write-Host "----------------------"
+$state.outputs.PSObject.Properties | ForEach-Object { "$($_.Name): $($_.Value.value)" }
+
+Write-Host ""
+Write-Host "✅ Done."
+```
+
+---
+
+### ▶️ Run it:
+
+```powershell
+.\tf_workspace_inspect.ps1 -Org "my-org" -Workspace "my-workspace" -Token "my-api-token"
+```
+
+---
+
+### 📦 Output Example:
+
+```
+🔍 Fetching workspace ID for 'my-org/my-workspace'...
+✅ Workspace ID: ws-abc123
+📦 Fetching current state version URL...
+⬇️ Downloading state file...
+✅ State file downloaded.
+
+🧱 Terraform Resources:
+-----------------------
+aws_instance             web_server
+aws_security_group       web_sg
+aws_rds_instance         main_db
+
+📤 Terraform Outputs:
+----------------------
+db_endpoint: mydb.abc123.us-east-1.rds.amazonaws.com
+vpc_id: vpc-0a1234bcdef5678
+
+✅ Done.
+```
+
+---
+
+## 🧰 Requirements
+
+Make sure you have:
+
+* **PowerShell 5+ or 7+**
+* `curl` (built-in on Windows 10+)
+* Internet access to Terraform Cloud
+
+---
+
+Would you like me to add a feature that **exports these results to CSV (resources + outputs)** automatically (works in both Bash and PowerShell)? It’s great for compliance or audit tracking.
+
