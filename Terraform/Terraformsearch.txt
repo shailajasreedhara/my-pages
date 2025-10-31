@@ -82,3 +82,102 @@ Then you can pipe the JSON through your preferred JSONPath/JMESPath query tool (
 ---
 
 Would you like me to give you **ready-to-use JMESPath filter strings** for specific AWS categories (like EC2, RDS, ElastiCache, etc.) — so you can quickly copy/paste in TFE UI search?
+Ah, now we’re getting practical — you want to **inspect a Terraform workspace to see how the RDS Proxy is configured** for your Global RDS. Let’s break this down.
+
+---
+
+### **1️⃣ Check Terraform State**
+
+Terraform stores information about all managed resources in its **state file**. On a workspace:
+
+```bash
+# Select your workspace first
+terraform workspace select <workspace_name>
+
+# List all resources managed in this workspace
+terraform state list
+```
+
+* Look for **RDS Proxy resources**. They usually look like:
+
+  ```
+    aws_db_proxy.rds_proxy_us_east_1
+      aws_db_proxy_target.rds_proxy_target_us_east_1
+        ```
+
+        ---
+
+        ### **2️⃣ Inspect the Proxy Configuration**
+
+        Once you know the resource names:
+
+        ```bash
+        # Show details of the proxy
+        terraform state show aws_db_proxy.rds_proxy_us_east_1
+        ```
+
+        Look for fields like:
+
+        | Field                    | Meaning                    |
+        | ------------------------ | -------------------------- |
+        | `engine_family`          | e.g., MYSQL, POSTGRES      |
+        | `vpc_subnet_ids`         | Subnets used for the proxy |
+        | `vpc_security_group_ids` | Security groups attached   |
+        | `auth.secret_arn`        | Secrets Manager reference  |
+        | `require_tls`            | Whether TLS is enforced    |
+
+        ---
+
+        ### **3️⃣ Check Target Attachments**
+
+        The proxy can have **one or more DB targets** (primary or read replicas):
+
+        ```bash
+        terraform state show aws_db_proxy_target.rds_proxy_target_us_east_1
+        ```
+
+        Important fields:
+
+        | Field                    | Meaning                                     |
+        | ------------------------ | ------------------------------------------- |
+        | `db_instance_identifier` | The actual RDS instance the proxy points to |
+        | `target_role`            | `WRITER` or `READER`                        |
+        | `status`                 | Current connection status                   |
+
+        ---
+
+        ### **4️⃣ Check Region vs Proxy**
+
+        * Compare the **workspace region** and the **RDS instance region**.
+        * If you see a **proxy in `us-east-2`** pointing to a DB in `us-east-1`, it’s configured for **cross-region access**.
+        * If the `target_role = READER` and the DB is in `us-east-2`, it’s pointing to a **local read replica**.
+
+        ---
+
+        ### **5️⃣ Optional: Outputs**
+
+        Check if there are outputs in Terraform that expose proxy endpoints:
+
+        ```bash
+        terraform output
+        ```
+
+        * Often, `rds_proxy_endpoint` is output.
+        * This is what your application connects to.
+
+        ---
+
+        ✅ **Summary of Steps to Check**
+
+        1. `terraform workspace select <workspace>`
+        2. `terraform state list | grep proxy`
+        3. `terraform state show <proxy_resource>` → check VPC, region, secret
+        4. `terraform state show <proxy_target_resource>` → check DB target, role, region
+        5. `terraform output` → verify endpoint used by services
+
+        ---
+
+        If you want, I can give you a **single Windows command sequence** to quickly list all RDS proxies, their targets, roles, and regions **directly from a Terraform workspace**. This works with Git + Terraform installed on Windows.
+
+        Do you want me to do that?
+        
