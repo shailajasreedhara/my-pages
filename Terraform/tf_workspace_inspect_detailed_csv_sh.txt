@@ -1,0 +1,192 @@
+Excellent 😎 — here’s the **enhanced, audit-ready version** of the script that:
+
+✅ Works in **Windows (Git Bash)**, macOS, or Linux
+✅ Extracts **resource type, name, region, ID, and ARN (if present)**
+✅ Extracts **outputs** (key + value)
+✅ Saves both to clean **CSV files** → `resources_detailed.csv` and `outputs.csv`
+
+---
+
+## 🧩 **Script: `tf_workspace_inspect_detailed_csv.sh`**
+
+```bash
+#!/bin/bash
+# ==========================================================
+# Terraform Cloud Workspace Inspector (Detailed CSV Export)
+# Works in Git Bash (Windows), macOS, or Linux
+# ==========================================================
+
+ORG=$1
+WORKSPACE=$2
+TOKEN=$3
+
+if [ -z "$ORG" ] || [ -z "$WORKSPACE" ] || [ -z "$TOKEN" ]; then
+  echo "Usage: $0 <organization> <workspace> <tfc_api_token>"
+  exit 1
+fi
+
+API="https://app.terraform.io/api/v2"
+
+# --- Fetch Workspace ID ---
+echo "🔍 Fetching workspace ID for '$ORG/$WORKSPACE'..."
+WORKSPACE_ID=$(curl -s \
+  --header "Authorization: Bearer $TOKEN" \
+  "$API/organizations/$ORG/workspaces/$WORKSPACE" | jq -r '.data.id')
+
+if [ "$WORKSPACE_ID" == "null" ]; then
+  echo "❌ Failed to get workspace ID. Check org/workspace name or token."
+  exit 1
+fi
+echo "✅ Workspace ID: $WORKSPACE_ID"
+
+# --- Fetch State Version URL ---
+echo "📦 Fetching current state version URL..."
+STATE_URL=$(curl -s \
+  --header "Authorization: Bearer $TOKEN" \
+  "$API/workspaces/$WORKSPACE_ID/current-state-version" | jq -r '.data.attributes."hosted-state-download-url"')
+
+if [ "$STATE_URL" == "null" ]; then
+  echo "❌ Failed to get state URL. Ensure workspace has a successful run."
+  exit 1
+fi
+
+# --- Download State File ---
+echo "⬇️  Downloading state file..."
+curl -s -o state.json "$STATE_URL"
+
+if [ ! -s state.json ]; then
+  echo "❌ State file download failed or empty."
+  exit 1
+fi
+echo "✅ State file downloaded: $(ls -lh state.json | awk '{print $5}')"
+
+# --- Extract Detailed Resource Info ---
+echo ""
+echo "🧱 Extracting detailed Terraform resources..."
+echo "--------------------------------------------"
+echo "type,name,region,id,arn" > resources_detailed.csv
+
+jq -r '
+  .resources[] |
+  . as $res |
+  .instances[]?.attributes |
+  [
+    $res.type,
+    $res.name,
+    (.availability_zone // .region // ""),
+    (.id // ""),
+    (.arn // "")
+  ]
+  | @csv
+' state.json >> resources_detailed.csv
+
+echo ""
+echo "📤 Extracting Terraform outputs..."
+echo "----------------------------------"
+echo "key,value" > outputs.csv
+jq -r '.outputs | to_entries[] | [.key, (.value.value|tostring)] | @csv' state.json >> outputs.csv
+
+# --- Display Summary ---
+echo ""
+echo "✅ Export complete!"
+echo "Resources CSV: $(pwd)/resources_detailed.csv"
+echo "Outputs CSV:   $(pwd)/outputs.csv"
+echo ""
+
+# Optional preview of top 10 resources
+echo "🧱 Sample of extracted resources:"
+head -n 10 resources_detailed.csv | column -t -s,
+
+echo ""
+echo "📤 Outputs summary:"
+head -n 10 outputs.csv | column -t -s,
+echo ""
+echo "✅ Done."
+```
+
+---
+
+## ⚙️ **How to Run It**
+
+1. Open **Git Bash**
+2. Ensure `jq` is installed:
+
+   ```bash
+   jq --version || { echo "Please install jq"; exit 1; }
+   ```
+3. Save the script:
+
+   ```bash
+   nano tf_workspace_inspect_detailed_csv.sh
+   ```
+
+   (Paste code above)
+4. Make it executable:
+
+   ```bash
+   chmod +x tf_workspace_inspect_detailed_csv.sh
+   ```
+5. Run it:
+
+   ```bash
+   ./tf_workspace_inspect_detailed_csv.sh my-org my-workspace my-api-token
+   ```
+
+---
+
+## 📊 **Example Output (Console)**
+
+```
+🔍 Fetching workspace ID for 'cloudteam/dev-env'...
+✅ Workspace ID: ws-123abc
+📦 Fetching current state version URL...
+⬇️  Downloading state file...
+✅ State file downloaded: 52K
+
+🧱 Extracting detailed Terraform resources...
+--------------------------------------------
+📤 Extracting Terraform outputs...
+----------------------------------
+
+✅ Export complete!
+Resources CSV: C:/Users/shailaja/resources_detailed.csv
+Outputs CSV:   C:/Users/shailaja/outputs.csv
+
+🧱 Sample of extracted resources:
+type                   name             region          id                      arn
+aws_instance           web_server       us-east-1a      i-08b7cbe5acbcd2e3d     arn:aws:ec2:us-east-1:123456789012:instance/i-08b7cbe5acbcd2e3d
+aws_security_group     web_sg           us-east-1       sg-0a1b2c3d4e5f6a7b     arn:aws:ec2:us-east-1:123456789012:security-group/sg-0a1b2c3d4e5f6a7b
+aws_rds_instance       main_db          us-east-1       mydb-xyz123             arn:aws:rds:us-east-1:123456789012:db:mydb-xyz123
+aws_elasticache_cluster redis_cluster   us-east-1       redis-001               arn:aws:elasticache:us-east-1:123456789012:cluster:redis-001
+
+📤 Outputs summary:
+key           value
+db_endpoint   mydb.abc123.us-east-1.rds.amazonaws.com
+vpc_id        vpc-0a1234bcdef5678
+
+✅ Done.
+```
+
+---
+
+## 📂 **Generated Files**
+
+### `resources_detailed.csv`
+
+| type               | name       | region     | id                  | arn                                                                   |
+| ------------------ | ---------- | ---------- | ------------------- | --------------------------------------------------------------------- |
+| aws_instance       | web_server | us-east-1a | i-08b7cbe5acbcd2e3d | arn:aws:ec2:us-east-1:123456789012:instance/i-08b7cbe5acbcd2e3d       |
+| aws_security_group | web_sg     | us-east-1  | sg-0a1b2c3d4e5f6a7b | arn:aws:ec2:us-east-1:123456789012:security-group/sg-0a1b2c3d4e5f6a7b |
+| aws_rds_instance   | main_db    | us-east-1  | mydb-xyz123         | arn:aws:rds:us-east-1:123456789012:db:mydb-xyz123                     |
+
+### `outputs.csv`
+
+| key         | value                                   |
+| ----------- | --------------------------------------- |
+| db_endpoint | mydb.abc123.us-east-1.rds.amazonaws.com |
+| vpc_id      | vpc-0a1234bcdef5678                     |
+
+---
+
+Would you like me to make a version that runs **on a schedule (e.g. daily)** and automatically uploads these CSVs to an **S3 bucket** or a **GitHub repo** for audit tracking?
+
