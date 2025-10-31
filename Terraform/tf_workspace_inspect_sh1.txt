@@ -1,0 +1,133 @@
+Excellent 👍 — here’s a **ready-to-run Bash script** that, given a **Terraform Cloud (or Enterprise)** workspace URL and your **API token**, will:
+
+✅ Fetch the workspace ID
+✅ Get the latest state version
+✅ Download the state JSON
+✅ Print a summary of all resources (type + name)
+✅ Print all outputs with values
+
+---
+
+### 🧩 **Script: `tf_workspace_inspect.sh`**
+
+```bash
+#!/bin/bash
+# ================================================
+# Terraform Cloud Workspace Inspector
+# Lists all resources and outputs in a workspace
+# ================================================
+
+# --- Usage ---
+# ./tf_workspace_inspect.sh <ORG_NAME> <WORKSPACE_NAME> <TFC_API_TOKEN>
+
+ORG=$1
+WORKSPACE=$2
+TOKEN=$3
+
+if [ -z "$ORG" ] || [ -z "$WORKSPACE" ] || [ -z "$TOKEN" ]; then
+  echo "Usage: $0 <organization> <workspace> <tfc_api_token>"
+  exit 1
+fi
+
+API="https://app.terraform.io/api/v2"
+
+echo "🔍 Fetching workspace ID for '$ORG/$WORKSPACE'..."
+WORKSPACE_ID=$(curl -s \
+  --header "Authorization: Bearer $TOKEN" \
+  "$API/organizations/$ORG/workspaces/$WORKSPACE" | jq -r '.data.id')
+
+if [ "$WORKSPACE_ID" == "null" ]; then
+  echo "❌ Failed to get workspace ID. Check org/workspace name or token."
+  exit 1
+fi
+echo "✅ Workspace ID: $WORKSPACE_ID"
+
+echo "📦 Fetching current state version URL..."
+STATE_URL=$(curl -s \
+  --header "Authorization: Bearer $TOKEN" \
+  "$API/workspaces/$WORKSPACE_ID/current-state-version" | jq -r '.data.attributes."hosted-state-download-url"')
+
+if [ "$STATE_URL" == "null" ]; then
+  echo "❌ Failed to get state URL. Ensure the workspace has a successful run."
+  exit 1
+fi
+
+echo "⬇️  Downloading state file..."
+curl -s -o state.json "$STATE_URL"
+
+if [ ! -s state.json ]; then
+  echo "❌ State file download failed or empty."
+  exit 1
+fi
+
+echo "✅ State file downloaded: $(ls -lh state.json | awk '{print $5}')"
+
+echo ""
+echo "🧱 Terraform Resources:"
+echo "-----------------------"
+jq -r '.resources[] | "\(.type)\t\(.name)"' state.json | column -t | sort
+
+echo ""
+echo "📤 Terraform Outputs:"
+echo "----------------------"
+jq -r '.outputs | to_entries[] | "\(.key): \(.value.value)"' state.json
+
+echo ""
+echo "✅ Done."
+```
+
+---
+
+### ⚙️ **Setup Instructions**
+
+1. Save the script to a file:
+
+   ```bash
+   nano tf_workspace_inspect.sh
+   ```
+
+   (Paste contents above)
+
+2. Make it executable:
+
+   ```bash
+   chmod +x tf_workspace_inspect.sh
+   ```
+
+3. Run it:
+
+   ```bash
+   ./tf_workspace_inspect.sh my-org my-workspace my-api-token
+   ```
+
+   (Your Terraform Cloud **User Token** or **Team Token** can be generated from
+   **User Settings → Tokens** in Terraform Cloud.)
+
+---
+
+### 📊 Example Output
+
+```
+🔍 Fetching workspace ID for 'my-org/my-workspace'...
+✅ Workspace ID: ws-abc123
+📦 Fetching current state version URL...
+⬇️  Downloading state file...
+✅ State file downloaded: 48K
+
+🧱 Terraform Resources:
+-----------------------
+aws_instance         web_server
+aws_security_group   web_sg
+aws_rds_instance     main_db
+aws_elasticache_cluster  redis
+
+📤 Terraform Outputs:
+----------------------
+db_endpoint: mydb.abc123.us-east-1.rds.amazonaws.com
+vpc_id: vpc-0a1234bcdef5678
+```
+
+---
+
+Would you like me to enhance it to **export the resources + outputs into a CSV file** (for audit or import into Excel)?
+
