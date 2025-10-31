@@ -1,0 +1,27 @@
+SRE notes:
+
+I have below info specific to a service
+On-boarding requirement :  
+On-board abc service with seil id s1 on to dev/test/qa/perf/prod env
+
+As am sre i have to decide/pick
+Which 
+artifact-id
+Business ID
+ModelID
+DeploymentID
+Env
+Tfe workspaces 
+Infra yaml repo
+Clustername
+Side cars
+Aws components 
+
+This will be maintained at one place for each service level. Like property file or in some common place.
+ Im going with maintaining property files for each business-id-artifactID ( we can define environment specific property with in)
+
+Goal is to generate terraform files using infrastructure .yaml files, terraform workspace spaces.
+I would be using some common env specific .tf templates.which must be included in the target .tf files.
+Aws component specific templates 
+I would be able to generate .Tf files using common env specific templates .tf format 
+.tf fi
