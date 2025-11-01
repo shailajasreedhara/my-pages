@@ -1,0 +1,207 @@
+Excellent — yes, you can absolutely do both ✅
+
+Let’s enhance the script to:
+
+1. **Support a single configuration file** (either `.yaml` or `.properties`) that provides:
+
+   * Command-line arguments (like `region`, `env`, `infra_yaml`, `tfe_token`, etc.)
+   * A whitelist of **variables to include in `env.tfvars`** (so it doesn’t dump everything from TFE outputs).
+
+2. Keep everything else the same — modular file generation, parameterized regions, etc.
+
+---
+
+## 💡 Revised Design Overview
+
+You’ll have a **driver configuration file** — for example, `config.yaml` or `config.properties`.
+
+### Example `config.yaml`
+
+```yaml
+# Configuration for Terraform generation
+env: dev
+region: us-east-1
+
+infra_yaml: infra/global.yaml
+tfe:
+  token: ${TFE_TOKEN}
+  org: my-org
+  workspace: global-rds
+
+# List of variables to include in env.tfvars
+tfvars_include:
+  - region
+  - alb_ingress_rules
+  - alb_egress_rules
+  - rds_endpoint
+  - elasticache_endpoint
+  - rds_proxy_arn
+```
+
+You can use either environment variable substitution (e.g., `${TFE_TOKEN}`) or hard-coded values.
+
+---
+
+## 🐍 Updated Python Script
+
+```python
+import os
+import yaml
+import requests
+import re
+from jinja2 import Environment, FileSystemLoader
+
+TFE_API = "https://app.terraform.io/api/v2"
+
+def load_config(config_file):
+    """Loads YAML or .properties config file."""
+    if config_file.endswith(".yaml") or config_file.endswith(".yml"):
+        with open(config_file, "r") as f:
+            data = yaml.safe_load(f)
+    else:
+        data = {}
+        with open(config_file, "r") as f:
+            for line in f:
+                if "=" in line and not line.strip().startswith("#"):
+                    key, val = line.strip().split("=", 1)
+                    data[key.strip()] = val.strip()
+
+    # Replace ${VAR} with environment values
+    for k, v in data.items():
+        if isinstance(v, str):
+            env_match = re.findall(r"\$\{(.*?)\}", v)
+            for match in env_match:
+                v = v.replace(f"${{{match}}}", os.getenv(match, ""))
+            data[k] = v
+    return data
+
+def get_tfe_workspace_vars(token, org, workspace):
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"{TFE_API}/organizations/{org}/workspaces/{workspace}/vars"
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+
+    vars_data = {}
+    for item in resp.json()["data"]:
+        key = item["attributes"]["key"]
+        value = item["attributes"]["value"]
+        vars_data[key] = value
+    return vars_data
+
+def get_tfe_outputs(token, org, workspace):
+    headers = {"Authorization": f"Bearer {token}"}
+    # Fetch workspace ID
+    ws_resp = requests.get(f"{TFE_API}/organizations/{org}/workspaces/{workspace}", headers=headers)
+    ws_resp.raise_for_status()
+    ws_id = ws_resp.json()["data"]["id"]
+
+    url = f"{TFE_API}/workspaces/{ws_id}/current-state-version"
+    resp = requests.get(url, headers=headers)
+    if resp.status_code != 200:
+        return {}
+    state_url = resp.json()["data"]["attributes"]["hosted-state-download-url"]
+    state_data = requests.get(state_url, headers=headers).json()
+    outputs = {k: v["value"] for k, v in state_data.get("outputs", {}).items()}
+    return outputs
+
+def load_yaml_config(yaml_path):
+    with open(yaml_path, "r") as f:
+        return yaml.safe_load(f)
+
+def merge_config(yaml_data, tfe_vars, tfe_outputs):
+    merged = {}
+    merged.update(yaml_data.get("variables", {}))
+    merged.update(tfe_vars)
+    merged.update(tfe_outputs)
+    return merged
+
+def render_templates(env_name, region, merged_config, include_list, template_dir="templates", output_dir="output"):
+    env = Environment(loader=FileSystemLoader(template_dir))
+    target_dir = os.path.join(output_dir, env_name)
+    os.makedirs(target_dir, exist_ok=True)
+
+    # Filter only desired variables for env.tfvars
+    filtered_vars = {k: v for k, v in merged_config.items() if k in include_list}
+
+    # Render env.tfvars
+    tfvars_template = env.get_template("env.tfvars.j2")
+    with open(os.path.join(target_dir, "env.tfvars"), "w") as f:
+        f.write(tfvars_template.render(vars=filtered_vars))
+
+    # Render main.tf with conditional variables
+    main_template = env.get_template("main.tf.j2")
+    with open(os.path.join(target_dir, "main.tf"), "w") as f:
+        f.write(main_template.render(env_name=env_name, vars=merged_config, region=region))
+
+    # Render connect.tf
+    connect_template = env.get_template("connect.tf.j2")
+    with open(os.path.join(target_dir, "connect.tf"), "w") as f:
+        f.write(connect_template.render(vars=merged_config))
+
+    # Copy static tf files
+    for static_file in ["providers.tf", "variables.tf", "monitoring.tf", "data.tf"]:
+        src = os.path.join(template_dir, static_file)
+        if os.path.exists(src):
+            os.system(f"cp {src} {target_dir}/")
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate Terraform files from infra.yaml + TFE + config")
+    parser.add_argument("--config", required=True, help="Path to configuration file (yaml or properties)")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    env_name = cfg["env"]
+    region = cfg["region"]
+    infra_yaml = cfg["infra_yaml"]
+    tfe_cfg = cfg.get("tfe", {})
+
+    yaml_data = load_yaml_config(infra_yaml)
+    tfe_vars = get_tfe_workspace_vars(tfe_cfg["token"], tfe_cfg["org"], tfe_cfg["workspace"])
+    tfe_outputs = get_tfe_outputs(tfe_cfg["token"], tfe_cfg["org"], tfe_cfg["workspace"])
+
+    merged_config = merge_config(yaml_data, tfe_vars, tfe_outputs)
+    include_list = cfg.get("tfvars_include", [])
+
+    render_templates(env_name, region, merged_config, include_list)
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### ✅ What’s New
+
+| Feature                         | Description                                               |
+| ------------------------------- | --------------------------------------------------------- |
+| **Config file input**           | Supply all command-line args via YAML or `.properties`    |
+| **Variable substitution**       | `${VAR}` resolved using environment variables             |
+| **Selective tfvars population** | Only include variables listed in `tfvars_include`         |
+| **Backward-compatible**         | Still modularizes files and copies static `.tf` templates |
+
+---
+
+### 🧠 Example Usage
+
+```bash
+python scripts/generate_tf_files.py --config config.yaml
+```
+
+### Output:
+
+```
+output/dev/
+ ├── env.tfvars     # Only includes tfvars_include vars
+ ├── main.tf        # All variables conditionally added
+ ├── connect.tf
+ ├── providers.tf
+ ├── variables.tf
+ ├── monitoring.tf
+ └── data.tf
+```
+
+---
+
+Would you like me to add **auto-region expansion** (so one run of `config.yaml` can generate both `us-east-1` and `us-east-2` outputs simultaneously from one YAML)?
+That’s useful for your multi-region ECS deployment use case.
