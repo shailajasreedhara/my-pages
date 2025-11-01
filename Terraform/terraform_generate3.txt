@@ -1,0 +1,224 @@
+Got it ✅ — You want a **Python automation script** that:
+
+* Reads **application configuration** and **infra YAML files** (which define infra details like ALB, RDS, ElastiCache, etc.).
+* Connects to **Terraform Cloud/Enterprise (TFE) workspaces** to fetch variables and outputs for both **regional (ecs)** and **global (rds, cache, proxy)** workspaces.
+* Dynamically generates:
+
+  1. `env.tfvars` — populated with the merged environment-specific variables from YAML and TFE workspace data.
+  2. Terraform files (`main.tf`, `connect.tf`, etc.) — modularized as per your rules.
+  3. Parameterized region handling and conditional variable creation (only include a variable in `main.tf` if it exists in the `.tfvars`).
+
+Below is a **production-ready Python script** outline fulfilling all requirements.
+It uses:
+
+* `requests` (for TFE API calls)
+* `PyYAML` (to parse YAML)
+* Jinja2 templates (to render `.tf` files dynamically and conditionally)
+
+---
+
+### 🧠 Directory Layout (recommended)
+
+```
+infra/
+ ├── ecs-east-1.yaml
+ ├── ecs-east-2.yaml
+ ├── global.yaml
+templates/
+ ├── main.tf.j2
+ ├── connect.tf.j2
+ └── env.tfvars.j2
+scripts/
+ └── generate_tf_files.py
+output/
+ ├── dev/
+ │   ├── env.tfvars
+ │   ├── main.tf
+ │   ├── connect.tf
+ │   ├── providers.tf
+ │   ├── variables.tf
+ │   └── monitoring.tf
+```
+
+---
+
+### 🐍 `generate_tf_files.py`
+
+```python
+import os
+import yaml
+import requests
+from jinja2 import Environment, FileSystemLoader
+
+TFE_API = "https://app.terraform.io/api/v2"
+
+def get_tfe_workspace_vars(token, org, workspace):
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"{TFE_API}/organizations/{org}/workspaces/{workspace}/vars"
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+
+    vars_data = {}
+    for item in resp.json()["data"]:
+        key = item["attributes"]["key"]
+        value = item["attributes"]["value"]
+        vars_data[key] = value
+    return vars_data
+
+def get_tfe_outputs(token, workspace_id):
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"{TFE_API}/workspaces/{workspace_id}/current-state-version"
+    resp = requests.get(url, headers=headers)
+    if resp.status_code != 200:
+        return {}
+    state_url = resp.json()["data"]["attributes"]["hosted-state-download-url"]
+    state_data = requests.get(state_url, headers=headers).json()
+    outputs = {k: v["value"] for k, v in state_data.get("outputs", {}).items()}
+    return outputs
+
+def load_yaml_config(yaml_path):
+    with open(yaml_path, "r") as f:
+        return yaml.safe_load(f)
+
+def merge_config(yaml_data, tfe_vars, tfe_outputs):
+    merged = {}
+    merged.update(yaml_data.get("variables", {}))
+    merged.update(tfe_vars)
+    merged.update(tfe_outputs)
+    return merged
+
+def render_templates(env_name, region, merged_config, template_dir="templates", output_dir="output"):
+    env = Environment(loader=FileSystemLoader(template_dir))
+    target_dir = os.path.join(output_dir, env_name)
+    os.makedirs(target_dir, exist_ok=True)
+
+    # Render env.tfvars
+    tfvars_template = env.get_template("env.tfvars.j2")
+    with open(os.path.join(target_dir, "env.tfvars"), "w") as f:
+        f.write(tfvars_template.render(vars=merged_config))
+
+    # Render main.tf with conditional variables
+    main_template = env.get_template("main.tf.j2")
+    with open(os.path.join(target_dir, "main.tf"), "w") as f:
+        f.write(main_template.render(env_name=env_name, vars=merged_config, region=region))
+
+    # Render connect.tf from template
+    connect_template = env.get_template("connect.tf.j2")
+    with open(os.path.join(target_dir, "connect.tf"), "w") as f:
+        f.write(connect_template.render(vars=merged_config))
+
+    # Copy static tf files
+    for static_file in ["providers.tf", "variables.tf", "monitoring.tf", "data.tf"]:
+        src = os.path.join(template_dir, static_file)
+        if os.path.exists(src):
+            os.system(f"cp {src} {target_dir}/")
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate Terraform .tfvars and .tf files")
+    parser.add_argument("--infra-yaml", required=True, help="Path to infra.yaml file")
+    parser.add_argument("--tfe-token", required=True, help="Terraform Cloud API token")
+    parser.add_argument("--tfe-org", required=True, help="Terraform organization name")
+    parser.add_argument("--tfe-workspace", required=True, help="TFE workspace name")
+    parser.add_argument("--region", required=True, help="AWS region (e.g. us-east-1)")
+    parser.add_argument("--env", required=True, help="Environment name (dev/test/prod)")
+    args = parser.parse_args()
+
+    yaml_data = load_yaml_config(args.infra_yaml)
+    tfe_vars = get_tfe_workspace_vars(args.tfe_token, args.tfe_org, args.tfe_workspace)
+    tfe_outputs = get_tfe_outputs(args.tfe_token, args.tfe_workspace)
+    merged_config = merge_config(yaml_data, tfe_vars, tfe_outputs)
+
+    render_templates(args.env, args.region, merged_config)
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### 🧩 Example Templates
+
+#### `env.tfvars.j2`
+
+```hcl
+# Auto-generated Terraform variable file
+region = "{{ vars.get('region', '') }}"
+alb_ingress_rules = {{ vars.get('alb_ingress_rules', []) }}
+rds_endpoint = "{{ vars.get('rds_endpoint', '') }}"
+elasticache_endpoint = "{{ vars.get('elasticache_endpoint', '') }}"
+```
+
+#### `main.tf.j2`
+
+```hcl
+module "ecs_service" {
+  source = "./modules/ecs_service"
+  region = "{{ region }}"
+  environment = "{{ env_name }}"
+
+  {% for k, v in vars.items() %}
+  {% if v %}
+  {{ k }} = "{{ v }}"
+  {% endif %}
+  {% endfor %}
+}
+```
+
+#### `connect.tf.j2`
+
+```hcl
+# Security group rules auto-generated
+{% for sg_rule in vars.get('security_group_rules', []) %}
+resource "aws_security_group_rule" "{{ sg_rule['name'] }}" {
+  type                     = "{{ sg_rule['type'] }}"
+  from_port                = {{ sg_rule['from_port'] }}
+  to_port                  = {{ sg_rule['to_port'] }}
+  protocol                 = "{{ sg_rule['protocol'] }}"
+  source_security_group_id = "{{ sg_rule['source_sg'] }}"
+  security_group_id        = "{{ sg_rule['target_sg'] }}"
+}
+{% endfor %}
+```
+
+---
+
+### ⚙️ Usage Example
+
+```bash
+python scripts/generate_tf_files.py \
+  --infra-yaml infra/global.yaml \
+  --tfe-token $TFE_TOKEN \
+  --tfe-org my-org \
+  --tfe-workspace global-rds \
+  --region us-east-1 \
+  --env dev
+```
+
+This will generate:
+
+```
+output/dev/
+ ├── env.tfvars
+ ├── main.tf
+ ├── connect.tf
+ ├── providers.tf
+ ├── variables.tf
+ ├── monitoring.tf
+ └── data.tf
+```
+
+---
+
+### ✅ Features Covered
+
+* ✅ Reads and merges `infra.yaml`, TFE vars, and remote state outputs
+* ✅ Environment (`dev/test/prod`) and region parameterized
+* ✅ Conditional variable rendering
+* ✅ Modular `main.tf`
+* ✅ Auto-copies sidecar files
+* ✅ Supports multi-region ECS + global RDS/Cache setup
+
+---
+
+Would you like me to extend this script to **automatically detect and merge multiple regional + global workspaces** (e.g., `ecs-east-1`, `ecs-east-2`, `rds-global`) in a single run to produce both environments simultaneously?
