@@ -1,0 +1,290 @@
+Perfect — you’re thinking exactly like a **Terraform automation architect** 👏
+
+Let’s refine this further to meet **real-world enterprise infra setups** like yours.
+
+You want the Python generator to:
+✅ Accept **multiple infra YAML files** (or a folder path containing them).
+✅ Accept **multiple TFE workspaces** (for ECS, RDS, RDS Proxy, ElastiCache, etc.).
+✅ Use only the selected workspaces for each app — configurable in the YAML.
+✅ Still allow a whitelist of variables (`tfvars_include`) for `env.tfvars`.
+
+Below is a **clean, modular version** of the script that implements all of that.
+
+---
+
+## 🧩 Example Directory Structure
+
+```
+infra/
+ ├── ecs.yaml
+ ├── rds.yaml
+ ├── rdsproxy.yaml
+ ├── elasticache.yaml
+ ├── global.yaml
+
+templates/
+ ├── main.tf.j2
+ ├── connect.tf.j2
+ ├── env.tfvars.j2
+ ├── providers.tf
+ ├── variables.tf
+ ├── monitoring.tf
+ ├── data.tf
+
+config/
+ └── config.yaml
+
+scripts/
+ └── generate_tf_files.py
+```
+
+---
+
+## 🧠 Example `config.yaml`
+
+```yaml
+# Which environment and region to target
+env: dev
+region: us-east-1
+
+# Path to infra folder (can also be a list)
+infra:
+  path: ./infra
+
+# Terraform Cloud/Enterprise settings
+tfe:
+  org: my-org
+  token: ${TFE_TOKEN}
+
+  # Select which workspaces to include
+  workspaces:
+    - ecs-east-1
+    - rds-global
+    - elasticache-global
+
+# Include only these variables in env.tfvars
+tfvars_include:
+  - region
+  - alb_ingress_rules
+  - alb_egress_rules
+  - rds_endpoint
+  - elasticache_endpoint
+  - rds_proxy_arn
+  - ecs_cluster_name
+```
+
+---
+
+## 🐍 Enhanced Script: `generate_tf_files.py`
+
+```python
+import os
+import yaml
+import requests
+import re
+from glob import glob
+from jinja2 import Environment, FileSystemLoader
+
+TFE_API = "https://app.terraform.io/api/v2"
+
+# ---------- Helper Functions ----------
+def load_config(config_file):
+    """Load YAML or properties config and resolve ${VAR} placeholders."""
+    if config_file.endswith((".yaml", ".yml")):
+        with open(config_file, "r") as f:
+            data = yaml.safe_load(f)
+    else:
+        data = {}
+        with open(config_file, "r") as f:
+            for line in f:
+                if "=" in line and not line.strip().startswith("#"):
+                    k, v = line.strip().split("=", 1)
+                    data[k.strip()] = v.strip()
+
+    def resolve_env(value):
+        if isinstance(value, str):
+            for match in re.findall(r"\$\{(.*?)\}", value):
+                value = value.replace(f"${{{match}}}", os.getenv(match, ""))
+        return value
+
+    def recurse(obj):
+        if isinstance(obj, dict):
+            return {k: recurse(resolve_env(v)) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [recurse(v) for v in obj]
+        else:
+            return resolve_env(obj)
+
+    return recurse(data)
+
+
+def get_tfe_workspace_vars(token, org, workspace):
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"{TFE_API}/organizations/{org}/workspaces/{workspace}/vars"
+    resp = requests.get(url, headers=headers)
+    if resp.status_code != 200:
+        print(f"⚠️ Warning: Unable to fetch vars for workspace {workspace}")
+        return {}
+    vars_data = {
+        item["attributes"]["key"]: item["attributes"]["value"]
+        for item in resp.json().get("data", [])
+    }
+    return vars_data
+
+
+def get_tfe_outputs(token, org, workspace):
+    headers = {"Authorization": f"Bearer {token}"}
+    ws_resp = requests.get(f"{TFE_API}/organizations/{org}/workspaces/{workspace}", headers=headers)
+    if ws_resp.status_code != 200:
+        print(f"⚠️ Warning: Unable to fetch workspace {workspace}")
+        return {}
+
+    ws_id = ws_resp.json()["data"]["id"]
+    state_resp = requests.get(f"{TFE_API}/workspaces/{ws_id}/current-state-version", headers=headers)
+    if state_resp.status_code != 200:
+        print(f"⚠️ Warning: No state found for {workspace}")
+        return {}
+
+    state_url = state_resp.json()["data"]["attributes"]["hosted-state-download-url"]
+    state_data = requests.get(state_url, headers=headers).json()
+    outputs = {k: v["value"] for k, v in state_data.get("outputs", {}).items()}
+    return outputs
+
+
+def load_infra_configs(infra_cfg):
+    """Load one or multiple YAML files (or folder path)."""
+    files = []
+    if isinstance(infra_cfg, dict) and "path" in infra_cfg:
+        path = infra_cfg["path"]
+        if os.path.isdir(path):
+            files = glob(os.path.join(path, "*.yaml"))
+        else:
+            files = [path]
+    elif isinstance(infra_cfg, list):
+        files = infra_cfg
+    else:
+        raise ValueError("Invalid 'infra' section in config.yaml")
+
+    merged = {}
+    for file in files:
+        with open(file, "r") as f:
+            data = yaml.safe_load(f)
+            if data and "variables" in data:
+                merged.update(data["variables"])
+    return merged
+
+
+def merge_all_configs(infra_vars, tfe_vars_list):
+    merged = {}
+    merged.update(infra_vars)
+    for tfe_vars in tfe_vars_list:
+        merged.update(tfe_vars)
+    return merged
+
+
+def render_templates(env_name, region, merged_config, include_list, template_dir="templates", output_dir="output"):
+    env = Environment(loader=FileSystemLoader(template_dir))
+    target_dir = os.path.join(output_dir, env_name)
+    os.makedirs(target_dir, exist_ok=True)
+
+    # Filter vars for env.tfvars
+    filtered_vars = {k: v for k, v in merged_config.items() if k in include_list}
+
+    # Render env.tfvars
+    tfvars_template = env.get_template("env.tfvars.j2")
+    with open(os.path.join(target_dir, "env.tfvars"), "w") as f:
+        f.write(tfvars_template.render(vars=filtered_vars))
+
+    # Render main.tf (conditional vars)
+    main_template = env.get_template("main.tf.j2")
+    with open(os.path.join(target_dir, "main.tf"), "w") as f:
+        f.write(main_template.render(env_name=env_name, vars=merged_config, region=region))
+
+    # Render connect.tf (SG rules)
+    connect_template = env.get_template("connect.tf.j2")
+    with open(os.path.join(target_dir, "connect.tf"), "w") as f:
+        f.write(connect_template.render(vars=merged_config))
+
+    # Copy static Terraform files
+    for static_file in ["providers.tf", "variables.tf", "monitoring.tf", "data.tf"]:
+        src = os.path.join(template_dir, static_file)
+        if os.path.exists(src):
+            os.system(f"cp {src} {target_dir}/")
+
+
+# ---------- Main ----------
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate Terraform .tfvars and .tf files")
+    parser.add_argument("--config", required=True, help="Path to YAML or .properties config")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    env_name = cfg["env"]
+    region = cfg["region"]
+    tfe_cfg = cfg["tfe"]
+
+    # Load infra YAMLs (single or folder)
+    infra_vars = load_infra_configs(cfg["infra"])
+
+    # Load selected TFE workspaces
+    tfe_vars_list = []
+    for ws in tfe_cfg.get("workspaces", []):
+        tfe_vars = get_tfe_workspace_vars(tfe_cfg["token"], tfe_cfg["org"], ws)
+        tfe_outputs = get_tfe_outputs(tfe_cfg["token"], tfe_cfg["org"], ws)
+        merged_ws = {**tfe_vars, **tfe_outputs}
+        tfe_vars_list.append(merged_ws)
+
+    merged_config = merge_all_configs(infra_vars, tfe_vars_list)
+    include_list = cfg.get("tfvars_include", [])
+
+    render_templates(env_name, region, merged_config, include_list)
+
+    print(f"✅ Terraform files generated successfully under output/{env_name}")
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+## ✅ What’s New (Compared to Previous Version)
+
+| Feature                                      | Description                                                                       |
+| -------------------------------------------- | --------------------------------------------------------------------------------- |
+| **Multiple TFE workspaces**                  | Each workspace (ecs, rds, rdsproxy, cache, etc.) is fetched, merged automatically |
+| **Selective workspace use**                  | Only those listed in `config.yaml → tfe.workspaces` are processed                 |
+| **Multiple infra files**                     | You can give a folder or explicit file list                                       |
+| **Merged configs**                           | Combines variables from all infra YAML + TFE vars + outputs                       |
+| **Still supports tfvars_include filtering**  |                                                                                   |
+| **Environment + region still parameterized** |                                                                                   |
+
+---
+
+## 🧠 Example Command
+
+```bash
+python scripts/generate_tf_files.py --config config/config.yaml
+```
+
+### Output
+
+```
+output/dev/
+ ├── env.tfvars     # Only whitelisted vars
+ ├── main.tf
+ ├── connect.tf
+ ├── providers.tf
+ ├── variables.tf
+ ├── monitoring.tf
+ └── data.tf
+```
+
+---
+
+Would you like me to extend it slightly so that:
+
+* It generates **multi-region outputs in one run** (e.g., `output/dev/us-east-1/` and `output/dev/us-east-2/`)
+* Each region merges its ECS workspace (`ecs-east-1`, `ecs-east-2`) with global infra?
+
+That’s ideal for your “multi-region ECS + global RDS/Cache” deployment case.
