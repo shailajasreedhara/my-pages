@@ -1,0 +1,228 @@
+
+Introduction
+With the rapid development on how applications are build & shipped, adopting the right deployment strategy is pivotal for ensuring robust Continuous Deployment (CD) and maintaining high software quality standards. Deployment strategies play a crucial role in DevOps practices, offering varied approaches to software release and infrastructure management. In this blog, we’ll explore several key deployment strategies, emphasising their relevance in Continuous Integration and Continuous Deployment pipelines, before focusing on the Blue-Green deployment method, particularly its implementation on AWS using Terraform, a leading Infrastructure as Code (IaC) tool.
+
+Rolling Deployment: This technique, integral to Continuous Deployment, involves incrementally updating servers with the new version. It’s highly compatible with Agile methodologies, ensuring minimal downtime and facilitating a stable Continuous Delivery process.
+Canary Deployment: A strategic fit for Continuous Deployment, canary deployment targets a small segment of the production environment first. Its gradual approach aligns well with Agile and DevOps principles, allowing for real-time monitoring and quick rollback if needed.
+A/B Testing Deployment: This strategy is crucial for user-centric Continuous Deployment, providing direct feedback on user engagement and experience. It’s a data-driven approach, often used in conjunction with Continuous Testing practices.
+Recreate Deployment: Simple yet effective, this strategy involves downtime but is sometimes used in Continuous Deployment when zero-downtime isn’t a critical factor. It’s straightforward and suitable for applications with flexible availability requirements.
+Shadow Deployment: Often used in Continuous Deployment and Continuous Testing, this strategy involves duplicating real traffic to a shadow version. It’s excellent for performance testing under real conditions without impacting the end-user experience.
+Focusing on Blue-Green Deployment, this strategy is used for Continuous Deployment with zero downtime. It involves maintaining two identical environments: the Blue (current production) and Green (new version). At any given time, only one of these environments is live, serving all production traffic. When it’s time to release a new version of the software, the update is first deployed to the inactive environment (e.g., green). The switch from Blue to Green ensures minimal downtime and provides a quick rollback mechanism in case of issues, aligning seamlessly with Continuous Deployment and Continuous Integration (CI) practices.
+
+Integrating Terraform, a prominent Infrastructure as Code tool, into Blue-Green deployment on AWS enhances the strategy. Terraform automates the creation and management of both environments, ensuring consistency and alignment with DevOps, Continuous Integration, and Continuous Deployment principles. This integration is particularly beneficial in AWS cloud environments, where managing complex infrastructures requires both precision and flexibility.
+
+When to use Blue-Green Deployment?
+There are several benefits to using blue-green deployment:
+
+Zero downtime: By routing traffic to the new environment before taking the old one out of service, you can ensure that there is no disruption to the end users.
+Easy rollback: If there are any issues with the new version of the software, you can quickly roll back by routing traffic back to the old environment.
+Improved reliability: By testing the new version of the software in a separate environment before releasing it to production, you can catch and fix any issues before they affect the end users.
+Confidence in Release: Blue-green deployment allows you to release software updates with confidence, knowing that you have a fallback plan in case anything goes wrong.
+Press enter or click to view image in full size
+
+Integrating Terraform with EC2 Autoscaling for Blue-Green Deployments
+While Blue-Green deployments offer significant advantages, integrating this strategy with tools like Terraform and EC2 Autoscaling groups presents its own set of challenges. In this section, we’ll delve into these challenges and outline the effective solutions we’ve developed at SquareOps
+
+The problem with Terraform and EC2 Autoscaling groups
+When implementing Blue-Green deployment using Terraform on AWS a key challenge emerges with EC2 Auto Scaling groups & how terraform operates. This challenge is crucial for DevOps engineers and cloud architects who rely on Terraform for infrastructure as code (IaC) practices and AWS CodeDeploy for seamless deployment processes. Addressing this issue is essential for optimizing Continuous Integration/Continuous Deployment (CI/CD) pipelines and ensuring efficient cloud resource management.
+
+The core of the problem lies in how Terraform interacts with AWS Auto Scaling groups during a Blue-Green deployment orchestrated by AWS CodeDeploy. AWS CodeDeploy, a critical service in AWS for automating software deployments, plays a vital role in this setup. According to the AWS CodeDeploy documentation, during a Blue-Green deployment, a new Auto Scaling group is created to transition to the new version of the application.
+
+However, when Terraform is used to create and manage these Auto Scaling groups, it does not automatically recognize or incorporate the new Auto Scaling group created by CodeDeploy into its state management. This discrepancy leads to Terraform attempting to recreate the Auto Scaling group with its original configuration during subsequent terraform apply operations. As a result, cloud engineers face errors and inconsistencies, which can disrupt the deployment process and lead to potential downtime or resource mismanagement.
+
+To delve deeper into this topic, it’s essential to understand the intricacies of Terraform’s state management and how it interacts with AWS services. Terraform’s state file is crucial for tracking the current state of the infrastructure it manages. When external changes are made to the infrastructure that Terraform manages (in this case, by AWS CodeDeploy), Terraform’s state file does not automatically update to reflect these changes. This leads to a state mismatch, causing Terraform to try to enforce the configuration as defined in its code, which doesn’t account for the new Auto Scaling group.
+
+Solution to Seamless Blue-Green Deployment for EC2 Autoscaling Groups with Terraform and AWS CodeDeploy
+To navigate this challenge, we’ve developed an approach that ensures Terraform, AWS CodeDeploy, and EC2 Autoscaling groups work in harmony. This section provides a detailed step-by-step implementation of the solution.
+
+1. Modify the official terraform module ( here Terraform-aws-module) to accommodate the solution requirements
+Add support for an additional variable to ignore resource tag-related changes. 
+
+# Add new variable to variables.tf file
+variable "ignore_tags" {
+  description = "Determines whether the `tags` value is ignored after initial apply. See README note for more details"
+  type        = bool
+  default     = true
+}
+whenever blue/green deployments are done by AWS CodeDeploy, a new autoscaling group is created on every deployment with a new name and additional tags like deployment ID. These details are not present in the Terraform state since the AWS Code triggered the change deploy service and not Terraform. To avoid the Terraform state deviation after each deployment, we created the AWS EC2 autoscaling group’s name with a unique tag ID.
+
+Add lifecycle policy in resource "aws_autoscaling_group to ignore_changes in tag property here –Terraform-aws-autoscaling
+
+
+lifecycle {
+    create_before_destroy = true
+    ignore_changes = [tag]
+  }
+}
+view rawlifecycle_tags.yaml hosted with ❤ by GitHub
+2. Sample Terraform code to deploy an EC2 Autoscaling group
+
+data "aws_autoscaling_groups" "app" {
+  filter {
+    name   = "tag:id"
+    values = ["app-asg"]
+  }
+}
+
+module "asg-app" {
+
+  source = "../modules/asg/"
+
+  name                = length(data.aws_autoscaling_groups.app.names) > 0 ? data.aws_autoscaling_groups.app.names[0] : "app-asg"
+  use_name_prefix     = false
+  desired_capacity    = 2
+  min_size            = 2
+  max_size            = 4
+  health_check_type   = "EC2"
+  vpc_zone_identifier = ["pvt-subnet-1-id", "pvt-subnet-2-id"]   ## replace with the VPC private subnet IDs
+  target_group_arns   = ["alb_target_group_arn"]               ## replace with ARN of the ALB Target Group
+
+  # Launch template
+
+  launch_template_name        = "app-launch-template"
+  launch_template_description = "Launch Template for application"
+  image_id                    = "ami-id"                        ## replace with the AMI ID of youe application
+  instance_type               = "t3.large"
+  ebs_optimized               = true
+  enable_monitoring           = false
+  security_groups             = [" sg-xxxxxxx "]                ## Add the security group IDs to attach to this ASG instances
+  key_name                    = "ssh-key-pair"                  ## Keypair used to launch instances in ASG
+  iam_instance_profile_name   = "ec2-role-for-s3-ssm-secret-manager"
+  user_data                   = base64encode("#!/bin/bash\necho \"Hello\"")
+
+  block_device_mappings = [
+    {
+      device_name = "/dev/sda1"
+      no_device   = 0
+      ebs = {
+        delete_on_termination = true
+        encrypted             = true
+        volume_size           = 30
+        volume_type           = "gp3"
+      }
+    }
+  ]
+  scaling_policies = {
+    dynamic_TTS_policy = {
+      policy_type = "TargetTrackingScaling"
+      target_tracking_configuration = {
+        predefined_metric_specification = {
+          predefined_metric_type = "ASGAverageCPUUtilization"
+        }
+        target_value = 70.0
+      }
+    }
+  }
+
+  tags = {
+    Name      = "app-asg"
+    terraform = "true"
+    id        = "app-asg"
+  }
+To avoid the AWS Autoscaling group module from creating auto-scaling groups with random names, we have set use_name_prefix to false
+Then using the terraform data source feature, we fetched the name of the new auto-scaling group with the help of tags and referred to it while calling the module again for any changes.
+
+This code snippet assumes that the VPC network and AWS Application Loadbalancers are already created. To get a complete example of creating an autoscaling group using Terraform, that includes VPC and ALB as well, send an email to consult@squareops.com to get full access to the Terraform library maintained by SquareOps
+Configuring AWS CodeDeploy for Blue-Green Deployment
+
+3. We have used Terraform to create the AWS code deploy service resources also and its configurations
+
+data "aws_autoscaling_groups" "app" {
+  filter {
+    name   = "tag:id"
+    values = ["app-asg"]
+  }
+}
+
+module "asg-app" {
+
+  source = "../modules/asg/"
+
+  name                = length(data.aws_autoscaling_groups.app.names) > 0 ? data.aws_autoscaling_groups.app.names[0] : "app-asg"
+  use_name_prefix     = false
+  desired_capacity    = 2
+  min_size            = 2
+  max_size            = 4
+  health_check_type   = "EC2"
+  vpc_zone_identifier = ["pvt-subnet-1-id", "pvt-subnet-2-id"]   ## replace with the VPC private subnet IDs
+  target_group_arns   = ["alb_target_group_arn"]               ## replace with ARN of the ALB Target Group
+
+  # Launch template
+
+  launch_template_name        = "app-launch-template"
+  launch_template_description = "Launch Template for application"
+  image_id                    = "ami-id"                        ## replace with the AMI ID of youe application
+  instance_type               = "t3.large"
+  ebs_optimized               = true
+  enable_monitoring           = false
+  security_groups             = [" sg-xxxxxxx "]                ## Add the security group IDs to attach to this ASG instances
+  key_name                    = "ssh-key-pair"                  ## Keypair used to launch instances in ASG
+  iam_instance_profile_name   = "ec2-role-for-s3-ssm-secret-manager"
+  user_data                   = base64encode("#!/bin/bash\necho \"Hello\"")
+
+  block_device_mappings = [
+    {
+      device_name = "/dev/sda1"
+      no_device   = 0
+      ebs = {
+        delete_on_termination = true
+        encrypted             = true
+        volume_size           = 30
+        volume_type           = "gp3"
+      }
+    }
+  ]
+  scaling_policies = {
+    dynamic_TTS_policy = {
+      policy_type = "TargetTrackingScaling"
+      target_tracking_configuration = {
+        predefined_metric_specification = {
+          predefined_metric_type = "ASGAverageCPUUtilization"
+        }
+        target_value = 70.0
+      }
+    }
+  }
+
+  tags = {
+    Name      = "app-asg"
+    terraform = "true"
+    id        = "app-asg"
+  }
+This terraform code snippet creates an IAM Role and Policy for CodeDeploy that grants AWS CodeDeploy the necessary permissions to perform deployments across EC2 instances and Autoscaling groups. This role will be assumed by the CodeDeploy service. It also creates the CodeDeploy Application and sets up deployment groups ( one for each of the Blue and Green environments. )
+
+4. Solution to the terraform state deviation problem
+We also created a script that needs to be run before any terraform operations. This will import new auto-scaling groups created by AWS Codedeploy Service’s Blue-Green Deployment strategy and replace the older auto-scaling group details. Now the terraform plan and terraform apply will not create a new auto-scaling group after the CI/CD deployments.
+
+terraform refresh
+# setting variables for auto scaling groups and policies location in state file
+asg_location=module.asg.aws_autoscaling_group.id[0]
+
+# checking the status of asgs in terraform state if there are changes then the new asg will be imported in place of that
+# importing the updates in asg
+terraform state show $asg_location | grep $(terraform output -raw asg_name) > /dev/null 2>&1
+if [ $? != 0 ]
+then
+    terraform state rm $asg_location
+    terraform import $asg_location $(terraform output -raw asg_name)
+    terraform refresh
+    terraform state rm 'module.asg.aws_autoscaling_policy.this["dynamic_TTS_policy"]'
+    terraform import 'module.asg.aws_autoscaling_policy.this["dynamic_TTS_policy"]' $(terraform output -raw asg_name)/dynamic_TTS_policy
+    echo "updated asg"
+fi
+Let us go through all the commands in this script:
+
+a.terraform refresh command refreshes the state of terraform to identify any changes.
+
+b. This command will match the name in outputs and state
+
+
+terraform state show $asg_location | grep $(terraform output -raw asg_name) > /dev/null 2>&1
+Conclusion
+In this blog, we’ve navigated through the challenges of setting up Blue-Green deployments using AWS, Terraform, and AWS CodeDeploy. Blue-Green deployment is more than just a deployment strategy; it’s a pathway to ensuring zero downtime, enhancing the reliability of your applications, and providing a safety net through easy rollbacks.
+
+By integrating this approach with Terraform’s powerful infrastructure as code capabilities and AWS’s scalable cloud infrastructure, we offer a solution that not only optimizes your deployment processes but also aligns with the best practices in cloud computing and DevOps.
+
+At SquareOps Technologies, our commitment to innovation and excellence in cloud services is unwavering. We understand that every organization’s needs are unique, and our team of experts is equipped to provide tailored solutions that meet your specific requirements. Whether you’re just starting your cloud journey or looking to optimize existing systems, our comprehensive suite of services in Kubernetes, CI/CD, Observability, Infrastructure as Code, Security, and Cost Optimizations is designed to guide and support you at every step.
+
+We invite you to reach out to us for any assistance in implementing Blue-Green deployments or other cloud and DevOps solutions. Let’s work together to transform your deployment strategy and propel your business toward greater efficiency and success.
