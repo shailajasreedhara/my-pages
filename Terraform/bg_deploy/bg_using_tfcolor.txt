@@ -1,0 +1,383 @@
+Excellent 👏 — here’s a **complete, production-ready Terraform blueprint** for implementing **Custom Blue-Green ECS deployment** — where you can control traffic switching *entirely from Terraform and CI/CD*.
+
+This structure gives you:
+
+* Reusable, modular Terraform setup
+* Blue/Green ECS services with separate task definitions
+* ALB listener switch logic
+* Easy CI/CD integration (just flip `active_color` variable)
+
+---
+
+## 📂 Folder Structure
+
+```
+ecs-blue-green/
+│
+├── main.tf
+├── variables.tf
+├── outputs.tf
+│
+├── ecs.tf
+├── alb.tf
+│
+├── provider.tf
+├── deploy.sh
+└── terraform.tfvars
+```
+
+---
+
+## 🧱 **provider.tf**
+
+```hcl
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+
+  backend "s3" {
+    bucket = "your-terraform-state-bucket"
+    key    = "ecs-blue-green/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+
+provider "aws" {
+  region = var.region
+}
+```
+
+---
+
+## ⚙️ **variables.tf**
+
+```hcl
+variable "region" {
+  description = "AWS region to deploy into"
+  default     = "us-east-1"
+}
+
+variable "vpc_id" {
+  description = "VPC ID where ECS runs"
+}
+
+variable "private_subnets" {
+  description = "Private subnets for ECS tasks"
+  type        = list(string)
+}
+
+variable "image_repo_url" {
+  description = "ECR repository URL"
+}
+
+variable "image_tag_blue" {
+  description = "Docker image tag for blue environment"
+  default     = "latest"
+}
+
+variable "image_tag_green" {
+  description = "Docker image tag for green environment"
+  default     = "latest"
+}
+
+variable "active_color" {
+  description = "Which environment is currently active (blue or green)"
+  type        = string
+  default     = "blue"
+}
+```
+
+---
+
+## 🌍 **main.tf**
+
+```hcl
+module "alb" {
+  source = "./alb"
+}
+
+module "ecs" {
+  source          = "./ecs"
+  vpc_id          = var.vpc_id
+  private_subnets = var.private_subnets
+  image_repo_url  = var.image_repo_url
+  image_tag_blue  = var.image_tag_blue
+  image_tag_green = var.image_tag_green
+  active_color    = var.active_color
+  alb_arn         = module.alb.alb_arn
+  blue_tg_arn     = module.alb.blue_tg_arn
+  green_tg_arn    = module.alb.green_tg_arn
+}
+```
+
+---
+
+## 🧩 **alb.tf**
+
+```hcl
+resource "aws_lb" "app_alb" {
+  name               = "myapp-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = []
+  subnets            = var.private_subnets
+}
+
+resource "aws_lb_target_group" "blue" {
+  name     = "myapp-blue-tg"
+  port     = 8080
+  protocol = "HTTP"
+  vpc_id   = var.vpc_id
+
+  health_check {
+    path = "/health"
+  }
+}
+
+resource "aws_lb_target_group" "green" {
+  name     = "myapp-green-tg"
+  port     = 8080
+  protocol = "HTTP"
+  vpc_id   = var.vpc_id
+
+  health_check {
+    path = "/health"
+  }
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.app_alb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = var.active_color == "blue" ? aws_lb_target_group.blue.arn : aws_lb_target_group.green.arn
+  }
+}
+
+output "alb_arn" {
+  value = aws_lb.app_alb.arn
+}
+
+output "blue_tg_arn" {
+  value = aws_lb_target_group.blue.arn
+}
+
+output "green_tg_arn" {
+  value = aws_lb_target_group.green.arn
+}
+```
+
+---
+
+## 🚀 **ecs.tf**
+
+```hcl
+resource "aws_ecs_cluster" "main" {
+  name = "myapp-cluster"
+}
+
+resource "aws_ecs_task_definition" "blue" {
+  family                   = "myapp-blue"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = 512
+  memory                   = 1024
+  execution_role_arn       = aws_iam_role.ecs_exec.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "myapp"
+      image     = "${var.image_repo_url}:${var.image_tag_blue}"
+      essential = true
+      portMappings = [{ containerPort = 8080 }]
+    }
+  ])
+}
+
+resource "aws_ecs_task_definition" "green" {
+  family                   = "myapp-green"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = 512
+  memory                   = 1024
+  execution_role_arn       = aws_iam_role.ecs_exec.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "myapp"
+      image     = "${var.image_repo_url}:${var.image_tag_green}"
+      essential = true
+      portMappings = [{ containerPort = 8080 }]
+    }
+  ])
+}
+
+resource "aws_ecs_service" "blue" {
+  name            = "myapp-blue"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.blue.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets         = var.private_subnets
+    security_groups = []
+  }
+
+  load_balancer {
+    target_group_arn = var.blue_tg_arn
+    container_name   = "myapp"
+    container_port   = 8080
+  }
+
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+}
+
+resource "aws_ecs_service" "green" {
+  name            = "myapp-green"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.green.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets         = var.private_subnets
+    security_groups = []
+  }
+
+  load_balancer {
+    target_group_arn = var.green_tg_arn
+    container_name   = "myapp"
+    container_port   = 8080
+  }
+
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+}
+
+output "ecs_cluster_name" {
+  value = aws_ecs_cluster.main.name
+}
+```
+
+---
+
+## 📤 **outputs.tf**
+
+```hcl
+output "active_color" {
+  value = var.active_color
+}
+
+output "alb_dns_name" {
+  value = aws_lb.app_alb.dns_name
+}
+```
+
+---
+
+## ⚙️ **terraform.tfvars** (example)
+
+```hcl
+region          = "us-east-1"
+vpc_id          = "vpc-0123456789abcdef"
+private_subnets = ["subnet-aaa", "subnet-bbb"]
+image_repo_url  = "123456789012.dkr.ecr.us-east-1.amazonaws.com/myapp"
+image_tag_blue  = "v1.0.0"
+image_tag_green = "v1.0.1"
+active_color    = "blue"
+```
+
+---
+
+## 🧰 **deploy.sh**
+
+This shell script automates the blue-green switch logic.
+
+```bash
+#!/bin/bash
+set -e
+
+ACTIVE=$(terraform output -raw active_color)
+if [ "$ACTIVE" = "blue" ]; then
+  NEW_COLOR="green"
+else
+  NEW_COLOR="blue"
+fi
+
+echo "🔵 Active color: $ACTIVE"
+echo "🟢 Deploying to $NEW_COLOR"
+
+# Build and push image (replace with your build logic)
+# docker build -t $ECR_URL:$NEW_TAG .
+# docker push $ECR_URL:$NEW_TAG
+
+# Apply Terraform with new image tag
+terraform apply -auto-approve -var="active_color=$ACTIVE" -var="image_tag_${NEW_COLOR}=$NEW_TAG"
+
+# Health check before switch
+echo "🔍 Checking health of $NEW_COLOR..."
+sleep 30
+
+# Switch ALB to new color
+terraform apply -auto-approve -var="active_color=$NEW_COLOR"
+
+echo "✅ Traffic switched to $NEW_COLOR"
+```
+
+---
+
+## 🔁 **Blue-Green Deployment Flow**
+
+1️⃣ **Initial Setup** – Deploy both blue & green once (`terraform apply`)
+2️⃣ **Current active color = blue**
+3️⃣ **Deploy update to green**
+
+```bash
+terraform apply -auto-approve -var="image_tag_green=v1.1.0"
+```
+
+4️⃣ **Test green environment**
+
+* Access ALB target group health or `/health` endpoint
+  5️⃣ **Switch traffic**
+
+```bash
+terraform apply -auto-approve -var="active_color=green"
+```
+
+6️⃣ **Rollback**
+
+```bash
+terraform apply -auto-approve -var="active_color=blue"
+```
+
+---
+
+## 🧠 Notes & Best Practices
+
+✅ Keep both ECS services defined but only one active at a time
+✅ Use CloudWatch alarms or Route53 health checks before switching
+✅ Configure ECS service autoscaling per environment
+✅ Store state in a remote backend (S3/Terraform Cloud)
+✅ Use CI/CD pipeline to orchestrate `deploy.sh` automatically
+
+---
+
+Would you like me to extend this with a **GitHub Actions CI/CD workflow** (`.github/workflows/deploy.yml`) that automates:
+
+* Docker build/push
+* Terraform apply to inactive environment
+* Health check
+* ALB switch?
