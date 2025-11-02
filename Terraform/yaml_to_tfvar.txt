@@ -171,12 +171,48 @@ def convert_yaml_to_tfvars(input_yaml, template_yaml, output_tfvars):
 
     print(f"✅ Generated {output_tfvars}")
 
+
+
+def format_hcl(value, indent=0):
+    """Format a Python object into Terraform HCL syntax (pure Python)."""
+    spaces = "  " * indent
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    elif isinstance(value, (int, float)):
+        return str(value)
+    elif isinstance(value, str):
+        return f"\"{value}\""
+    elif isinstance(value, list):
+        if not value:
+            return "[]"
+        formatted_items = []
+        for item in value:
+            formatted_item = format_hcl(item, indent + 1)
+            formatted_items.append(f"{spaces}  {formatted_item}")
+        return "[\n" + ",\n".join(formatted_items) + f"\n{spaces}]"
+    elif isinstance(value, dict):
+        if not value:
+            return "{}"
+        formatted_items = []
+        for k, v in value.items():
+            formatted_v = format_hcl(v, indent + 1)
+            formatted_items.append(f"{spaces}  {k} = {formatted_v}")
+        return "{\n" + "\n".join(formatted_items) + f"\n{spaces}}}"
+    else:
+        return "\"\""
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 4:
         print("Usage: python yaml_to_tfvars_advanced.py <env.yaml> <template.yaml> <env.tfvars>")
         sys.exit(1)
     
     convert_yaml_to_tfvars(sys.argv[1], sys.argv[2], sys.argv[3])
+
+
+
+
 ```
 
 ---
