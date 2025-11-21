@@ -1,0 +1,67 @@
+Here is the **compact SRE-only requirement & implementation checklist** — minimal, clean, copy/paste-ready.
+
+---
+
+# ✅ **SRE – Requirements to Clarify (Compact List)**
+
+### **Pipeline & Execution**
+
+* Stage placement: run after TEST deployment?
+* Should failures block promotion?
+* Need warm-up/health-check delay?
+
+### **Runner / Agent**
+
+* Do we need a custom agent with Java + Maven + Chrome + Chromedriver?
+* Browser/driver version compatibility?
+* Resource requirements (CPU/memory/parallelism)?
+
+### **Environment Access**
+
+* TEST environment URL?
+* Is TEST reachable from the Jules runner (network/VPC/firewall)?
+* Health-check endpoint for readiness?
+
+### **Secrets**
+
+* Required secrets (test users, API tokens, JWTs)?
+* Where to store? (Jules secure vars / Vault / AWS Secrets Manager)
+* How to inject into Maven test run?
+
+### **Reports**
+
+* Exact Cucumber report directory?
+* Required formats (JSON, HTML, JUnit)?
+* Artifact retention period?
+
+### **TestSight**
+
+* API endpoint for upload?
+* Authentication method?
+* Expected payload format?
+* Metadata needed (build number, run ID, environment)?
+* Upload on success only or always?
+
+### **Logging & Observability**
+
+* Need to capture browser logs/screenshots?
+* Alerts required (Slack/Email)?
+* Any Splunk/Dynatrace integration?
+
+---
+
+# 🔧 **SRE – Implementation Steps (Compact Sequence)**
+
+1. **Gather inputs** from QA/Tools: mvn command, report paths, secrets, TestSight API.
+2. **Validate TEST connectivity** from Jules runner + configure health-checks.
+3. **Prepare runner** with Java, Maven, Chrome, Chromedriver.
+4. **Add E2E stage** in Jules → run `mvn clean test` with injected secrets.
+5. **Collect & store reports** (JSON/HTML/screenshots) as artifacts.
+6. **Implement TestSight upload** via script (Groovy/Python) with retries.
+7. **Add notifications/observability** (Slack, logs, optional Splunk).
+8. **Run dry-run validation** → fix failures, confirm upload works.
+9. **Enable automated execution** on every TEST deployment → finalize runbook.
+
+---
+
+If you want, I can also create a **single-page Confluence-ready checklist** version.
