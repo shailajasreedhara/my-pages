@@ -1,0 +1,231 @@
+Below is a **ready-to-copy Confluence page** for requirement gathering. It’s structured, detailed, and formatted exactly like internal SRE/QA/DevOps standards.
+You can paste this directly into Confluence.
+
+---
+
+# **📘 E2E Test Automation Integration Requirements – Jules Pipeline + Giene Framework + TestSight**
+
+## **1. Overview**
+
+This page captures all requirements needed to integrate the **Giene-based End-to-End Test Framework** (Java + Selenium + Cucumber) into the **Jules CI/CD pipeline**, and to publish Cucumber results into **TestSight**.
+
+The goal is to automate E2E execution for the **TEST environment** as part of the release pipeline, ensuring complete visibility, reliability, and traceability of test results.
+
+---
+
+# **2. Stakeholders**
+
+| Role            | Team              | Responsibilities                                                            |
+| --------------- | ----------------- | --------------------------------------------------------------------------- |
+| SRE             | Platform / DevOps | Pipeline design, execution workflow, agent configuration, report processing |
+| QA Automation   | QA                | Giene test development, Cucumber reports, test data management              |
+| Development     | App Teams         | API readiness, environment support, integration help                        |
+| TestSight Admin | Tools Team        | TestSight API access, dashboards, ingestion rules                           |
+
+---
+
+# **3. Scope**
+
+### **In-Scope**
+
+* Running E2E test suite using `mvn test` in Jules.
+* Headless Selenium execution.
+* Publishing Cucumber JSON/HTML reports as pipeline artifacts.
+* Uploading Cucumber test results to TestSight.
+* Integrating results into TestSight dashboards.
+* Ensuring stable execution on TEST environment after deployment.
+
+### **Out-of-Scope**
+
+* Authoring or modifying Giene test cases.
+* Manual testing activities.
+* UAT/Production execution (future extension).
+
+---
+
+# **4. High-Level Workflow**
+
+1. Deployment to TEST environment completes.
+2. Jules triggers the E2E Test Stage.
+3. Pipeline executes:
+
+   * `mvn clean test` (Giene framework)
+   * Selenium headless tests
+4. Cucumber reports are generated under `/target/...`
+5. Reports uploaded to TestSight.
+6. Artifacts stored for audit.
+7. Notifications sent to Slack/Email based on success/failure.
+
+---
+
+# **5. Technical Requirements to Clarify**
+
+## **5.1 E2E Framework Details**
+
+| Requirement   | Questions to Clarify                                     | Owner |
+| ------------- | -------------------------------------------------------- | ----- |
+| Maven command | Confirm full command: `mvn clean test`, profiles needed? | QA    |
+| Test config   | Any JVM args? environment variables?                     | QA    |
+| Test runtime  | Approx. number of tests? total execution duration?       | QA    |
+| Report output | Exact directory path for Cucumber JSON/HTML              | QA    |
+
+---
+
+## **5.2 Selenium Execution**
+
+| Requirement   | Questions                                 | Owner |
+| ------------- | ----------------------------------------- | ----- |
+| Headless mode | Confirm Chrome/Chromium headless required | QA    |
+| Driver        | Chromedriver version compatibility?       | SRE   |
+| Dependencies  | Any additional libs? Browser flags?       | QA    |
+| Parallelism   | Expected threads?                         | QA    |
+
+---
+
+## **5.3 Jules Pipeline Integration**
+
+| Requirement        | Questions                                          | Owner       |
+| ------------------ | -------------------------------------------------- | ----------- |
+| Pipeline stage     | Run after deployment to TEST?                      | Dev/SRE     |
+| Blocking behavior  | Should test failures block promotion?              | Business/QA |
+| Agent requirements | Do we need custom agent with Chrome + JDK + Maven? | SRE         |
+| Retries            | Need retry for flaky tests?                        | QA          |
+
+---
+
+## **5.4 Environment Dependencies**
+
+| Requirement   | Questions                                         | Owner  |
+| ------------- | ------------------------------------------------- | ------ |
+| Target URL    | TEST env base URL?                                | Dev    |
+| Health checks | Should pipeline validate API health before tests? | SRE    |
+| Test data     | Do test users need reset/seed?                    | QA     |
+| Secrets       | Credentials needed for login?                     | QA/SRE |
+| Feature flags | Need to toggle flags for tests?                   | Dev    |
+
+---
+
+## **5.5 Credentials & Secrets**
+
+| Requirement     | Questions                                               | Owner    |
+| --------------- | ------------------------------------------------------- | -------- |
+| Secret store    | Use Jules secure variables? Vault? AWS Secrets Manager? | SRE      |
+| Type of secrets | Test user credentials, tokens, API keys                 | QA       |
+| Rotation        | Expiry period? rotation policy?                         | Security |
+
+---
+
+## **5.6 Cucumber Report Handling**
+
+| Requirement    | Questions                                               | Owner      |
+| -------------- | ------------------------------------------------------- | ---------- |
+| Report formats | JSON? HTML? JUnit XML?                                  | QA         |
+| Storage        | Artifact retention period?                              | SRE        |
+| Parsing        | Do we need to transform format before TestSight upload? | Tools Team |
+| Attachments    | Screenshots needed for failed cases?                    | QA         |
+
+---
+
+## **5.7 TestSight Integration**
+
+| Requirement    | Questions                                | Owner     |
+| -------------- | ---------------------------------------- | --------- |
+| API endpoint   | What is TestSight ingestion URL?         | Tools     |
+| Auth           | API token? OAuth?                        | Tools/SRE |
+| Payload        | Accepts Cucumber JSON directly?          | Tools     |
+| Metadata       | Require run ID, build number, timestamp? | Tools     |
+| Error handling | What if upload fails? retry logic?       | SRE       |
+| Dashboards     | Does a project dashboard already exist?  | QA/Tools  |
+
+---
+
+## **5.8 Observability & Notifications**
+
+| Requirement | Questions                                        | Owner |
+| ----------- | ------------------------------------------------ | ----- |
+| Logging     | Capture console logs? Browser logs?              | QA    |
+| Storage     | Upload logs/screenshots to S3 or artifact store? | SRE   |
+| Alerts      | Slack/Email alert rules?                         | SRE   |
+| Metrics     | Push to Splunk/Dynatrace?                        | SRE   |
+
+---
+
+# **6. Non-Functional Requirements**
+
+### **6.1 Performance**
+
+* Tests should complete within X minutes.
+* Parallel execution allowed if supported by framework.
+
+### **6.2 Reliability**
+
+* Flaky tests must be identified and handled via retries.
+* Pipeline should not false-fail.
+
+### **6.3 Security**
+
+* Secrets must never be logged.
+* Test accounts must be isolated from prod accounts.
+
+### **6.4 Compliance**
+
+* Store reports for audit retention (90 days or as defined).
+* Tag reports with build/release identifiers.
+
+---
+
+# **7. Deliverables (SRE-Owned)**
+
+| Deliverable               | Description                            |
+| ------------------------- | -------------------------------------- |
+| Jules Pipeline Stage      | Build-in test stage with mvn execution |
+| Agent/Docker Image        | Maven + JDK + Chrome/Chromedriver      |
+| TestSight Upload Script   | Groovy/Python upload logic             |
+| Health Check Script       | Validate TEST environment readiness    |
+| Artifact Publishing       | Store Cucumber JSON, HTML, screenshots |
+| Observability Integration | Logs to Splunk, optional metrics       |
+| Runbook                   | Steps for debugging failures           |
+
+---
+
+# **8. Open Questions / Pending Inputs**
+
+(Keep this updated)
+
+| Item                                         | Waiting For | Notes |
+| -------------------------------------------- | ----------- | ----- |
+| TestSight API documentation                  | Tools Team  |       |
+| Exact Cucumber report path                   | QA          |       |
+| Credentials for TestSight                    | Tools/SRE   |       |
+| TEST environment URL & health check endpoint | Dev         |       |
+| Browser version compatibility matrix         | QA          |       |
+
+---
+
+# **9. Flow Diagram (Insert After Requirements Are Finalized)**
+
+**To be added**
+Diagram will show:
+**Jules → Deploy → TEST Env → mvn test → Cucumber Reports → TestSight Upload → Notifications**
+
+---
+
+# **10. Next Steps**
+
+1. Gather missing inputs from QA, Dev, and Tools teams.
+2. Finalize required agent image for test execution.
+3. Design and implement Jules pipeline stage.
+4. Validate TestSight upload with sample data.
+5. Perform dry-run test execution.
+6. Enable E2E testing for TEST deployments.
+
+---
+
+If you want, I can also generate:
+
+✔ A **flow diagram (Mermaid or draw.io XML)**
+✔ A **Jules pipeline YAML/Groovy template**
+✔ A **TestSight upload code snippet** (Python/Groovy)
+✔ A simpler **executive summary version** for managers
+
+Just tell me which version you want next.
