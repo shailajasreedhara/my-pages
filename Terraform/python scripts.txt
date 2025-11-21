@@ -1,0 +1,171 @@
+Here is a **clear, production-quality architecture diagram** for your requirement:
+
+---
+
+# 🧩 **Architecture Diagram — Internal HTML Trigger → Python Script → GitHub Commit**
+
+```
+                     ┌────────────────────────────────────────┐
+                     │        Internal User (Browser)          │
+                     │  - Loads HTML page                      │
+                     │  - Clicks "Run Script" button           │
+                     └───────────────▲─────────────────────────┘
+                                     │  (HTTPS - internal)
+                                     │
+                           Internal Network / VPN / VPC
+                                     │
+                                     ▼
+                    ┌────────────────────────────────────────┐
+                    │         HTML Frontend (Internal)       │
+                    │  Option A: Private S3 Website           │
+                    │  Option B: Confluence Page (Iframe/JS)  │
+                    │  Option C: Hosted on EC2 (Nginx)        │
+                    └───────────────▲─────────────────────────┘
+                                     │ JavaScript Fetch/POST
+                                     │ calls API
+                                     ▼
+                    ┌────────────────────────────────────────┐
+                    │     Application Load Balancer (ALB)     │
+                    │  - Internal only (no public IP)          │
+                    │  - Routes /run to backend                │
+                    └───────────────▲─────────────────────────┘
+                                     │
+                                     ▼
+         ┌─────────────────────────────────────────────────────────────────┐
+         │                     EC2 Instance (Private)                      │
+         │-----------------------------------------------------------------│
+         │  Runs:                                                          │
+         │   - Flask or FastAPI backend (receives POST from HTML)         │
+         │   - Your Python script (script.py)                              │
+         │   - Git CLI                                                     │
+         │                                                                 │
+         │  Workflow:                                                      │
+         │    1. Backend receives request from HTML                        │
+         │    2. Loads GitHub Token / SSH Key from Secrets Manager         │
+         │    3. Clones GitHub Repo                                        │
+         │    4. Script generates files/code                               │
+         │    5. Git commit + push back to GitHub                          │
+         │                                                                 │
+         │  Security:                                                      │
+         │    - No public internet access                                  │
+         │    - Only internal users can reach the endpoint                 │
+         └───────────────▲─────────────────────────────────────────────────┘
+                         │
+                         │ IAM Role (read-only)
+                         ▼
+          ┌─────────────────────────────────────────────────────────┐
+          │         AWS Secrets Manager / SSM Parameter Store       │
+          │  - Stores GitHub App Token OR SSH Private Key           │
+          │  - EC2 retrieves secure credential at runtime           │
+          └─────────────────────────────────────────────────────────┘
+
+                         ▼ SSH / Token Auth
+          ┌─────────────────────────────────────────────────────────┐
+          │                   GitHub Repository                     │
+          │      - Codebase to clone                                │
+          │      - Branch to commit to                              │
+          └─────────────────────────────────────────────────────────┘
+```
+
+---
+
+# 🔍 **Explanation of Each Component**
+
+### **1. Internal User**
+
+* Sees a simple HTML page with a button.
+* Clicking button triggers Python script through API call.
+
+---
+
+### **2. HTML Frontend**
+
+Hosted in any internal-only location:
+
+* Private S3 → best option
+* Confluence → works if you embed HTML/JS
+* EC2 Nginx → simplest and flexible
+
+Contains JS like:
+
+```js
+fetch('/run', {method: 'POST'})
+```
+
+---
+
+### **3. Internal ALB**
+
+* Internal-facing only
+* Routes `/run` → EC2
+* Prevents direct access to EC2
+
+---
+
+### **4. EC2 Backend (Core Logic)**
+
+Runs:
+
+* Python web server (Flask/FastAPI)
+* Your GitHub automation script
+
+Handles:
+
+* Fetch secret token
+* Clone repository
+* Generate files
+* Git add → commit → push
+
+---
+
+### **5. Secrets Manager / SSM**
+
+Stores:
+
+* GitHub Personal Access Token (PAT) **or**
+* GitHub App private key **or**
+* SSH private key
+
+Backend retrieves it at runtime:
+
+```python
+token = ssm.get_parameter(
+    Name="/github/token",
+    WithDecryption=True
+)['Parameter']['Value']
+```
+
+---
+
+### **6. GitHub**
+
+Python script interacts with GitHub:
+
+* Clone repo
+* Modify files
+* Commit + push
+
+---
+
+# 🎯 Summary
+
+This architecture gives you:
+
+* ✔ Internal-only access
+* ✔ Secure GitHub token handling
+* ✔ Full Python environment
+* ✔ Easy extension (logging, audit trail)
+* ✔ Ability to add authentication (e.g., SSO)
+* ✔ No need for Lambda packaging complexity
+
+---
+
+If you want, I can generate:
+
+✅ AWS Diagram in Draw.io format
+✅ Terraform/IaC for EC2 + ALB + S3 + IAM
+✅ Flask backend code
+✅ HTML frontend code
+✅ GitHub commit script code
+
+Just tell me **“generate full implementation”**.
