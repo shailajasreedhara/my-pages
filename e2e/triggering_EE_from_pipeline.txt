@@ -1,0 +1,268 @@
+Below is a **production-grade Jules Shared Library** for **triggering and running E2E tests from *any* pipeline**, including:
+
+* Reusable **trigger function** (App pipeline → E2E pipeline)
+* Reusable **E2E execution function** (checkout → mvn test → archive → TestSight upload)
+* Reusable **TestSight uploader step**
+* Folder structure for your shared library
+
+This lets you integrate E2E with **1 line** in any Jules pipeline:
+
+```groovy
+e2e.runE2ETests(params)
+```
+
+---
+
+# ✅ **1. Shared Library File Structure**
+
+Create your shared library repo like:
+
+```
+jules-shared-library/
+ ├── vars/
+ │    ├── e2e.groovy
+ │    ├── testsightUploader.groovy
+ │    └── pipelineTrigger.groovy
+ └── resources/
+      └── scripts/
+           └── upload-testsight.sh
+```
+
+---
+
+# ✅ **2. vars/pipelineTrigger.groovy**
+
+A reusable **trigger function** to call another Jules pipeline.
+
+```groovy
+def call(Map config) {
+    if (!config.pipelineName) {
+        error("pipelineName is required")
+    }
+
+    def triggerUrl = "https://jules.company.com/api/pipeline/v2/run"
+    def token = config.apiToken ?: env.JULES_API_TOKEN
+    if (!token) error("API token missing")
+
+    def body = [
+        pipelineName: config.pipelineName,
+        parameters  : config.parameters ?: [:]
+    ]
+
+    sh """
+        curl -X POST ${triggerUrl} \
+        -H "Authorization: Bearer ${token}" \
+        -H "Content-Type: application/json" \
+        -d '${groovy.json.JsonOutput.toJson(body)}'
+    """
+
+    echo "Triggered pipeline: ${config.pipelineName}"
+}
+```
+
+---
+
+# ✅ **3. vars/testsightUploader.groovy**
+
+Reusable uploader for TestSight.
+
+```groovy
+def call(Map config) {
+
+    if (!config.reportFile) {
+        error("reportFile is mandatory")
+    }
+
+    def token = config.apiToken ?: env.TESTSIGHT_API_TOKEN
+    if (!token) {
+        error("TESTSIGHT_API_TOKEN missing")
+    }
+
+    def tsUrl = config.endpoint ?: "https://testsight.company.com/api/upload"
+
+    sh """
+        chmod +x ${libraryResource('scripts/upload-testsight.sh')}
+        ${libraryResource('scripts/upload-testsight.sh')} \
+            ${config.reportFile} \
+            ${config.buildId ?: env.BUILD_ID} \
+            ${config.environment} \
+            ${tsUrl} \
+            ${token}
+    """
+
+    echo "Uploaded results to TestSight"
+}
+```
+
+---
+
+# ✅ **4. resources/scripts/upload-testsight.sh**
+
+(Used by all pipelines)
+
+```bash
+#!/bin/bash
+REPORT=$1
+BUILD_ID=$2
+ENV=$3
+TS_URL=$4
+TOKEN=$5
+
+curl -X POST "$TS_URL" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "report=@${REPORT}" \
+  -F "buildId=${BUILD_ID}" \
+  -F "environment=${ENV}"
+```
+
+---
+
+# ✅ **5. vars/e2e.groovy**
+
+Your main reusable **E2E test executor**.
+
+```groovy
+def runE2ETests(Map config = [:]) {
+
+    def testRepo = config.testRepo ?: "https://github.com/org/e2e-tests.git"
+    def testBranch = config.testBranch ?: "main"
+    def testUrl = config.testUrl ?: env.TEST_URL
+    def tag = config.tag ?: "@Smoke"
+
+    pipeline {
+        agent { label config.agent ?: 'selenium-runner' }
+        
+        parameters {
+            string(name: 'TEST_URL', defaultValue: testUrl, description: 'App Test URL')
+        }
+
+        stages {
+
+            stage('Checkout Tests') {
+                steps {
+                    git url: testRepo, branch: testBranch
+                }
+            }
+
+            stage('Run Maven Tests') {
+                steps {
+                    sh """
+                        mvn clean test \
+                            -Dapp.url=${params.TEST_URL} \
+                            -Dcucumber.filter.tags=${tag} \
+                            -Dchrome.options="--headless --no-sandbox"
+                    """
+                }
+            }
+
+            stage('Archive Reports') {
+                steps {
+                    archiveArtifacts artifacts: 'target/cucumber-reports/**'
+                }
+            }
+
+            stage('Upload to TestSight') {
+                steps {
+                    testsightUploader(
+                        reportFile: "target/cucumber-reports/cucumber.json",
+                        buildId: config.buildId ?: env.BUILD_ID,
+                        environment: params.TEST_URL
+                    )
+                }
+            }
+        }
+
+        post {
+            always {
+                echo "E2E Completed: ${currentBuild.currentResult}"
+            }
+        }
+    }
+}
+```
+
+---
+
+# ✅ **6. Using This Shared Library in a Jules Pipeline**
+
+In any Jules pipeline:
+
+```groovy
+@Library('jules-shared-library') _
+
+pipeline {
+    agent any
+
+    stages {
+
+        stage('Deploy to TEST') {
+            steps {
+                // your deployment logic
+            }
+        }
+
+        stage('Run E2E Tests') {
+            steps {
+                e2e.runE2ETests(
+                    testUrl: env.TEST_URL,
+                    tag: "@Regression"
+                )
+            }
+        }
+    }
+}
+```
+
+---
+
+# 🧩 **7. Triggering E2E Pipeline From App Pipeline**
+
+Use the shared trigger:
+
+```groovy
+@Library('jules-shared-library') _
+
+pipeline {
+    agent any
+
+    stages {
+
+        stage('Deploy to TEST') {
+            steps {
+                // deploy
+            }
+        }
+
+        stage('Trigger E2E') {
+            steps {
+                pipelineTrigger(
+                    pipelineName: "e2e-pipeline",
+                    parameters: [
+                        TEST_URL: env.TEST_URL,
+                        BUILD_ID: env.BUILD_ID
+                    ]
+                )
+            }
+        }
+    }
+}
+```
+
+---
+
+# 🎉 **This Setup Gives You:**
+
+* Central reusable E2E library
+* One-click/manual-trigger support
+* Standardized TestSight upload
+* Cleaned pipelines (no copy paste)
+* Consistent headless Selenium execution
+* Easy integration for any team
+
+---
+
+If you want, I can also generate:
+
+📌 *Confluence page content using these scripts*
+📌 *PlantUML architecture diagram for E2E pipeline flow*
+📌 *A packaged ZIP folder of the shared library structure*
