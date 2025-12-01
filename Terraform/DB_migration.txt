@@ -1,0 +1,267 @@
+Below is **the cleanest Terraform architecture** for integrating **an ECS application workspace + an RDS workspace** and then **running DDL/DML DB migration scripts** in a secure, repeatable way.
+
+This pattern is used in enterprise setups (multi-workspace TFE/TFC), where:
+
+* **ECS workspace** = application deployment
+* **RDS workspace** = DB creation/management
+* **DB-MIGRATION workspace (recommended)** = runs schema + data migrations
+
+Let’s break down **how to integrate ECS + RDS workspaces correctly** and **run migration scripts** safely.
+
+---
+
+# ✅ **Recommended Terraform Architecture**
+
+You should have **3 workspaces**:
+
+```
+terraform-workspace-rds        (creates RDS)
+terraform-workspace-ecs        (creates ECS cluster/service/task)
+terraform-workspace-db-migrate (runs migration tasks)
+```
+
+This decouples the responsibilities properly.
+
+---
+
+# ⭐ Why you should not run DDL/DML from the ECS app workspace
+
+Because:
+
+* DB migrations must run **before** ECS app deploy
+* They must **not run again during each ECS deploy**
+* They must run **in a controlled one-time task**
+* They often require elevated DB privileges (NOT given to the ECS service)
+
+---
+
+# 🧱 Architecture
+
+Here is how the integration should work:
+
+```
+      +------------------------+             +------------------------+
+      |    RDS Workspace       |  exports →  |    ECS Workspace       |
+      |  (rds endpoint, creds) |-------------| (app uses DB endpoint) |
+      +------------------------+             +------------------------+
+                       |
+                       | provides endpoint, creds
+                       ↓
+      +---------------------------------------------+
+      |       DB Migration Terraform Workspace      |
+      |  (creates ECS run-task to run DDL/DML)      |
+      +---------------------------------------------+
+```
+
+---
+
+# 🧩 Step 1: **Expose RDS Outputs in RDS Workspace**
+
+In your **RDS workspace**, add outputs:
+
+## `outputs.tf`
+
+```hcl
+output "db_endpoint" {
+  value = aws_db_instance.mydb.address
+}
+
+output "db_port" {
+  value = aws_db_instance.mydb.port
+}
+
+output "db_username" {
+  value = var.master_username
+}
+
+output "db_password" {
+  value = var.master_password
+  sensitive = true
+}
+```
+
+These outputs will be consumed by ECS workspace and the DB migration workspace.
+
+---
+
+# 🧩 Step 2: **Import RDS Outputs in ECS Workspace**
+
+Use Terraform Remote State Data Source:
+
+## `ecs/main.tf`
+
+```hcl
+data "terraform_remote_state" "rds" {
+  backend = "remote"
+  config = {
+    organization = "YOUR_TFC_ORG"
+    workspaces = {
+      name = "terraform-workspace-rds"
+    }
+  }
+}
+```
+
+Now ECS can use the DB config:
+
+```hcl
+environment = {
+  DB_HOST = data.terraform_remote_state.rds.outputs.db_endpoint
+  DB_PORT = data.terraform_remote_state.rds.outputs.db_port
+  DB_USER = data.terraform_remote_state.rds.outputs.db_username
+  DB_PASS = data.terraform_remote_state.rds.outputs.db_password
+}
+```
+
+---
+
+# 🧩 Step 3: **Create a DB Migration Terraform Workspace**
+
+This workspace:
+
+### ✔ Does NOT create RDS
+
+✔ Does NOT create ECS services
+✔ ONLY launches a **one-time ECS task** that runs DDL/DML scripts
+✔ Integrates both ECS and RDS via remote-state
+
+---
+
+# 🧩 Step 4: **DB Migration Workspace Reads from Both ECS + RDS**
+
+## `db-migration/main.tf`
+
+```hcl
+# Get DB information from RDS workspace
+data "terraform_remote_state" "rds" {
+  backend = "remote"
+  config = {
+    organization = "YOUR_TFC_ORG"
+    workspaces = {
+      name = "terraform-workspace-rds"
+    }
+  }
+}
+
+# Get ECS networking details (subnets, SGs)
+data "terraform_remote_state" "ecs" {
+  backend = "remote"
+  config = {
+    organization = "YOUR_TFC_ORG"
+    workspaces = {
+      name = "terraform-workspace-ecs"
+    }
+  }
+}
+```
+
+---
+
+# 🧩 Step 5: **Define the DB Migration ECS Task**
+
+Using the module from previous message:
+
+## `db-migration/db_task.tf`
+
+```hcl
+module "db_migration" {
+  source = "../modules/db_migration_task"
+
+  family         = "db-migration"
+  container_name = "db-migration"
+  image          = "123456789.dkr.ecr.us-east-1.amazonaws.com/db-migration:latest"
+
+  command        = ["./run_migration.sh"]
+
+  environment = {
+    DB_HOST = data.terraform_remote_state.rds.outputs.db_endpoint
+    DB_PORT = data.terraform_remote_state.rds.outputs.db_port
+    DB_USER = data.terraform_remote_state.rds.outputs.db_username
+    DB_PASS = data.terraform_remote_state.rds.outputs.db_password
+  }
+
+  cluster_arn      = data.terraform_remote_state.ecs.outputs.cluster_arn
+  subnets          = data.terraform_remote_state.ecs.outputs.private_subnets
+  security_groups  = data.terraform_remote_state.ecs.outputs.ecs_task_sg
+
+  run_migration = var.run_migration
+}
+```
+
+---
+
+# 🧩 Step 6: **DB Migration Script (inside container)**
+
+Inside the image:
+
+`run_migration.sh`:
+
+```bash
+#!/bin/bash
+set -e
+
+echo "Running migration on $DB_HOST ..."
+
+psql -h $DB_HOST -U $DB_USER -d mydb -f /scripts/ddl.sql
+psql -h $DB_HOST -U $DB_USER -d mydb -f /scripts/dml.sql
+
+echo "Migration completed!"
+```
+
+Exit code 0 → Terraform deploy success
+Exit code 1 → Terraform fails (correct behavior)
+
+---
+
+# 🧩 Step 7: **Control When Migration Runs**
+
+In `db-migration/variables.tf`:
+
+```hcl
+variable "run_migration" {
+  type    = bool
+  default = false
+}
+```
+
+When you want to run migration:
+
+```
+terraform apply -var="run_migration=true"
+```
+
+Terraform runs the one-time ECS task and stops.
+
+---
+
+# 🎯 Final Outcome — What You Get
+
+After this design, you have:
+
+### ✔ RDS built in its own workspace
+
+### ✔ ECS app built in a separate workspace
+
+### ✔ DB migrations executed in a dedicated one-time task workspace
+
+### ✔ Automatic reuse of RDS endpoint, credentials, subnets, SGs
+
+### ✔ Fully IaC-controlled DDL/DML execution
+
+### ✔ No ECS service accidentally running DB scripts continuously
+
+### ✔ Safe, repeatable, zero-downtime deploy flow
+
+---
+
+# 📦 Want me to generate?
+
+If you want, I can generate:
+
+🔥 Complete folder structure for all 3 workspaces
+🔥 Complete module folder layout
+🔥 Dockerfile for DB migration container
+🔥 Integration with Spinnaker pipeline (Run Task)
+🔥 Terraform Cloud workspace variables setup guide
+
+Just tell me what you want next.
