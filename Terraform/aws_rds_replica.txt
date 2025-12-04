@@ -1,0 +1,195 @@
+Below is a **clear, step-by-step debugging guide** for **cross-region Aurora replication not happening** (primary in **us-east-1**, replica in **us-east-2**), especially when managed through **Terraform** and accessed by **Spring Boot** services.
+
+---
+
+# ✅ **1. Verify if Aurora Global Database is Actually Configured**
+
+Cross-region replication in Aurora **does NOT work with standard RDS Replicas**.
+You must use **Aurora Global Database** (global_cluster).
+
+**Check in AWS Console → RDS → Global databases:**
+
+* Do you see a **Global Cluster**?
+* Is us-east-1 the **primary**?
+* Is us-east-2 added as a **secondary cluster**?
+
+If you do **not** see the global cluster, Terraform may not have created it.
+
+### Terraform resources you should have:
+
+```hcl
+aws_rds_global_cluster
+aws_rds_cluster  # primary
+aws_rds_cluster  # secondary (region = us-east-2)
+```
+
+---
+
+# ✅ **2. Check Replication State in AWS Console**
+
+Go to:
+
+**RDS → Clusters → (secondary cluster in us-east-2)**
+Look for:
+
+* **Replication Role** → "secondary"
+* **Replication State** → should be → `replicating`, `active`, or `in-sync`
+* **Last Error**
+* **Replication lag**
+
+If state shows **error**, note the message (e.g., wrong version, incompatible configs, KMS keys, or networking).
+
+---
+
+# ✅ **3. Confirm Aurora Versions Match**
+
+Global replication **requires identical versions** between primary and secondary:
+
+Check:
+
+* Aurora MySQL version or Aurora PostgreSQL version
+* parameter groups identical?
+* engine mode = "provisioned"
+
+Mismatch = replication won’t attach.
+
+---
+
+# ✅ **4. Verify KMS Keys (if encrypted)**
+
+If your cluster is encrypted:
+
+* Global database requires **same KMS key or shared key across regions**
+* If you used a region-specific KMS key in us-east-1, it **won’t replicate to us-east-2**
+
+Check:
+
+* KMS key in primary → multi-region enabled
+* Secondary cluster uses same or multi-region replica of the primary key
+
+---
+
+# ✅ **5. Check Terraform Workspaces Are Not Causing Drift**
+
+Since you're using separate **workspaces**:
+
+* Workspace for us-east-1 (primary)
+* Workspace for us-east-2 (replica)
+
+Common mistakes:
+
+* Terraform created 2 *independent* clusters, not a global cluster
+* Secondary cluster missing the `global_cluster_identifier`
+* Order of creation wrong (secondary created before global cluster exists)
+
+### Validate Terraform state:
+
+Run in each workspace:
+
+```sh
+terraform state list
+```
+
+Check for:
+
+* `aws_rds_global_cluster`
+* `aws_rds_cluster.primary`
+* `aws_rds_cluster.secondary`
+
+If secondary cluster is missing:
+
+```hcl
+global_cluster_identifier = aws_rds_global_cluster.global.id
+```
+
+---
+
+# ✅ **6. Networking / Security Checks**
+
+Replication is internal to Aurora/RDS, but the following must NOT block metadata replication:
+
+* VPC endpoint issues
+* Security groups restricting RDS management traffic (*rare but possible*)
+* KMS permission failures
+  Check CloudWatch logs for RDS events.
+
+---
+
+# ✅ **7. Check RDS Event Logs**
+
+In RDS → Events:
+
+Look for:
+
+* Replication failure errors
+* KMS decrypt errors
+* Parameter group conflicts
+* Version mismatch errors
+
+---
+
+# ✅ **8. Check Spring Boot application (just to avoid confusion)**
+
+Spring Boot **does NOT impact replication**—it only uses the database endpoint.
+
+But make sure:
+
+* Services are not accidentally writing directly to the replica (should be read-only).
+* No credentials mismatch causing connection failures.
+
+Note: Aurora automatically makes cross-region replicas **read-only**.
+
+---
+
+# 🔧 **9. Validate Terraform Configuration Example (Correct Global DB Setup)**
+
+### Primary Region (us-east-1)
+
+```hcl
+resource "aws_rds_global_cluster" "this" {
+  global_cluster_identifier = "my-global-db"
+}
+
+resource "aws_rds_cluster" "primary" {
+  cluster_identifier       = "my-primary"
+  engine                   = "aurora-mysql"
+  engine_version           = "8.0.mysql_aurora.3.05.2"
+  global_cluster_identifier = aws_rds_global_cluster.this.id
+  ...
+}
+```
+
+### Secondary Region (us-east-2)
+
+```hcl
+provider "aws" {
+  region = "us-east-2"
+}
+
+resource "aws_rds_cluster" "replica" {
+  cluster_identifier       = "my-replica"
+  engine                   = "aurora-mysql"
+  global_cluster_identifier = "my-global-db"   # must match primary
+  ...
+}
+```
+
+If **global_cluster_identifier is missing**, replication will never start.
+
+---
+
+# 🔍 **10. If replication is stuck: Force re-attach secondary cluster**
+
+In us-east-2:
+
+1. Stop using the cluster
+2. Delete the **secondary** cluster only (not the global cluster)
+3. Recreate it with Terraform (correct global cluster id)
+
+---
+
+# If you want:
+
+I can help you check your **exact Terraform code**, your **RDS config**, or your **replication status output**. If you paste them, I will pinpoint the issue in seconds.
+
+Would you like a Terraform module template for cross-region Aurora Global DB?
